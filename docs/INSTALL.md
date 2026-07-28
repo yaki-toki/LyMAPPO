@@ -1,7 +1,27 @@
 # Installation
 
-Target environment: **Linux or WSL2 (Ubuntu 22.04 / 24.04)**. Native
-Windows builds of ns-3 are not supported.
+Target environment: **Ubuntu 22.04 / 24.04** — native Linux, or WSL2 on
+Windows. Native Windows builds of ns-3 are not supported.
+
+## 0. Windows hosts: WSL2 setup (skip on native Linux)
+
+```powershell
+# administrator PowerShell, then reboot
+wsl --install -d Ubuntu-24.04
+```
+
+Recommendations for WSL2:
+
+- Clone both this repo and ns-3 **inside the WSL filesystem** (`~`),
+  not under `/mnt/c` / `/mnt/d`: builds are several times faster and
+  the checkout is guaranteed LF.
+- `install.sh` pins the build PATH to Linux system directories, so
+  Windows toolchains (mingw, Anaconda, CUDA) inherited into WSL's PATH
+  cannot leak headers into the ns-3 build.
+- Host-side unit tests (`python -B -m pytest tests -q`) and the figure
+  scripts also run with Windows Python — only the ns-3 build and the
+  actual simulations require the Ubuntu side.
+- To script runs from PowerShell: `wsl bash -c "cd ~/LyMAPPO && bash scripts/smoke.sh"`.
 
 | Component | Version |
 |---|---|

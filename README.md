@@ -40,8 +40,12 @@ draft-inspired MAPC prototypes are on the [roadmap](docs/ROADMAP.md).
 
 ## Quick start
 
-Requires Linux or WSL2 (Ubuntu 22.04/24.04). See
+The simulation always builds and runs on **Ubuntu Linux** — either
+natively or inside **WSL2 on Windows**; native Windows builds of ns-3
+are not supported. Pick your track below. See
 [docs/INSTALL.md](docs/INSTALL.md) for details and troubleshooting.
+
+### Track A — Ubuntu 22.04 / 24.04 (native Linux)
 
 ```bash
 # 1. dependencies (once, interactive sudo)
@@ -60,6 +64,39 @@ bash install.sh
 
 # 4. smoke: one short training run (a few minutes)
 bash scripts/smoke.sh
+```
+
+### Track B — Windows 10/11 (via WSL2)
+
+One-time setup — install WSL2 with Ubuntu (administrator PowerShell,
+then reboot):
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Open the Ubuntu shell (`wsl`) and follow **Track A inside the WSL
+filesystem** (clone into `~`, not under `/mnt/c` or `/mnt/d`): the WSL
+filesystem is much faster for the ns-3 build and a Linux checkout
+guarantees LF line endings (`.gitattributes` enforces this either way).
+`install.sh` automatically isolates the build from the inherited
+Windows PATH, so a standard Windows development setup does not
+interfere.
+
+Two things work directly with **Windows Python** (no ns-3, no WSL
+needed) — handy for developing policies and plotting on the host:
+
+```powershell
+git clone https://github.com/yaki-toki/LyMAPPO.git ; cd LyMAPPO
+pip install -r requirements.txt
+python -B -m pytest tests -q          # host-side unit tests (32 tests)
+python -B scripts/figures/fig_topology.py   # figures from results/ CSVs
+```
+
+You can also drive WSL runs from PowerShell without opening a shell:
+
+```powershell
+wsl bash -c "cd ~/LyMAPPO && bash scripts/smoke.sh"
 ```
 
 ## Repository layout
