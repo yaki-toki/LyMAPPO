@@ -60,20 +60,15 @@ else
     echo "[install] ns3-ai already present -- skip clone"
 fi
 
-# Some bundled ns3-ai examples do not compile against the ns-3.40 API.
-# Removing the directories is not enough: their add_subdirectory() references
-# must also be commented out, or CMake configure fails.
-if [ -d "${NS3AI_DIR}/examples" ]; then
-    rm -rf "${NS3AI_DIR}/examples/rate-control/thompson-sampling"
-    rm -rf "${NS3AI_DIR}/examples/rl-tcp"
-    rm -rf "${NS3AI_DIR}/examples/multi-bss"
-    sed -i -E 's/^([[:space:]]*)add_subdirectory\((rl-tcp|multi-bss)\)/\1# pruned (ns-3.40 incompatible): add_subdirectory(\2)/' \
-        "${NS3AI_DIR}/examples/CMakeLists.txt"
-    if [ -f "${NS3AI_DIR}/examples/rate-control/CMakeLists.txt" ]; then
-        sed -i -E 's|^([[:space:]]*)add_subdirectory\((thompson-sampling)\)|\1# pruned (ns-3.40 incompatible): add_subdirectory(\2)|' \
-            "${NS3AI_DIR}/examples/rate-control/CMakeLists.txt"
+# ns3ai_utils — the Python side of the ns3-ai shared-memory interface,
+# needed by the drivers (Experiment / msg_interface).
+if ! python3 -c 'import ns3ai_utils' >/dev/null 2>&1; then
+    if [ -d "${NS3AI_DIR}/python_utils" ]; then
+        echo "[install] pip-installing ns3ai_utils"
+        python3 -m pip install -e "${NS3AI_DIR}/python_utils"
+    else
+        echo "[install] WARN: ns3ai_utils not importable and python_utils/ not found"
     fi
-    echo "[install] pruned ns3-ai examples incompatible with ns-3.40"
 fi
 
 # ---------- sync scenario + drivers ----------------------------------------
@@ -86,11 +81,14 @@ cp -f "${REPO_ROOT}"/drivers/*.py "${DST}/"
 cp -f "${REPO_ROOT}/models/mappo.py" "${REPO_ROOT}/models/networks.py" "${DST}/"
 echo "[install] synced scenario/ + drivers/ + models/ -> contrib/ai/examples/feddrl/"
 
-EX_CMAKE="${NS3AI_DIR}/examples/CMakeLists.txt"
-if ! grep -q '^add_subdirectory(feddrl)' "${EX_CMAKE}"; then
-    echo 'add_subdirectory(feddrl)' >> "${EX_CMAKE}"
-    echo "[install] registered feddrl in contrib/ai/examples/CMakeLists.txt"
-fi
+# ns3-ai bundles demo examples, several of which do not compile against the
+# pinned ns-3.40 API (and their layout shifts upstream). Only feddrl is
+# needed: make it the sole example. Idempotent — rewritten on every run.
+cat > "${NS3AI_DIR}/examples/CMakeLists.txt" <<'EOF'
+# Overwritten by LyMAPPO install.sh: build only the feddrl example.
+add_subdirectory(feddrl)
+EOF
+echo "[install] examples index -> feddrl only"
 
 # ---------- build -----------------------------------------------------------
 pushd "${NS3_ROOT}" >/dev/null
