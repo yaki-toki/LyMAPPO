@@ -112,32 +112,159 @@ wsl bash -c "cd ~/LyMAPPO && bash scripts/smoke.sh"
 | `tests/` | unit tests (aggregation, FL baselines, observation encoding, surrogate environment) |
 | `docs/` | INSTALL, REPRODUCE, ROADMAP |
 
-## Run an experiment
+## Full workflow, step by step
 
-Every battery script follows the same pattern: it syncs `drivers/` and
-`models/` into the ns-3 example directory, then launches training or
-evaluation runs whose KPI lines are appended to CSV/text files under
-`results/`. Paths are controlled by two environment variables
-(defaults shown):
+### How a run works
 
-```bash
-REPO_ROOT=<this checkout>   # auto-detected by the scripts
-NS3_ROOT=$HOME/ns-3-dev
+```mermaid
+flowchart LR
+    subgraph host["Python (driver process)"]
+        D["train_ns3.py / feddrl.py"] --> M["models/: actor MLPs,<br/>quantile critic, duals"]
+    end
+    subgraph ns3["ns-3 (child process)"]
+        S["feddrl_scenario<br/>16 AP x 5 STA, 3 bands"]
+    end
+    D -- "ActMsg: per-STA link choice (every 20 ms)" --> S
+    S -- "EnvMsg: queues, HoL age, CBR,<br/>served / violation / drop counters" --> D
 ```
 
-Example — train one LyMAPPO seed and evaluate it:
+The Python driver creates the ns3-ai shared-memory segment and launches
+the ns-3 scenario as a child process (`ns3ai_utils.Experiment`). Every
+20 ms macro-slot the scenario reports per-STA/per-link counters
+(EnvMsg) and receives per-STA link selections (ActMsg). Training
+updates PPO every 32-slot rollout and the Lyapunov duals every slot;
+evaluation just runs the policy and prints `[KPI]` (network) and
+`[KPI_AP]` (per-AP) lines **at the end of the episode** — a long silent
+run is normal, do not kill it early.
+
+All battery scripts follow the same pattern: sync `drivers/` +
+`models/` into `$NS3_ROOT/contrib/ai/examples/feddrl/`, run from there,
+append stdout to files under `$REPO_ROOT/results/`. Two environment
+variables control every path (no absolute paths anywhere):
+
+```bash
+REPO_ROOT=<this checkout>    # auto-detected by the scripts
+NS3_ROOT=$HOME/ns-3-dev      # override if ns-3 lives elsewhere
+```
+
+### Step 0 — install once
+
+Follow the [Quick start](#quick-start) track for your OS. Under the
+hood `install.sh` (idempotent, safe to re-run): clones ns3-ai into
+`$NS3_ROOT/contrib/ai` and pip-installs its `ns3ai_utils` Python side;
+replaces the ns3-ai examples index so **only** the `feddrl` scenario
+builds (the bundled demos do not compile against pinned ns-3.40); syncs
+`scenario/` + `drivers/` + `models/` into the example dir; configures
+ns-3 (`default` profile — the `optimized` profile trips a GCC ICE on
+ns-3.40) and builds with `-DNS3_AI_AVAILABLE`.
+
+### Step 1 — smoke test (minutes)
+
+```bash
+bash scripts/smoke.sh
+```
+
+runs an 8-iteration training against the real scenario. Expected output,
+one line per iteration:
+
+```
+[iter   6] T=32 aloss=-0.0041 closs=170.970 ret=+39.11 srv/slot=6.1 p99=0.0000 p99.9=0.0000 Z99=0.85±1.10 Z999=1.26±1.32 coord=0%
+```
+
+`T` = rollout slots, `aloss`/`closs` = actor/critic loss, `ret` = mean
+shaped return, `srv/slot` = delivered packets per macro-slot per AP,
+`p99`/`p99.9` = training-window violation rates, `Z99`/`Z999` = dual
+mean±std across the 16 APs (these moving is the Lyapunov machinery
+working), `coord` = coordination-mode usage (0 % — frozen to `none`).
+It ends by writing `results/smoke_s0.pt`.
+
+### Step 2 — train a policy (tens of minutes per seed)
 
 ```bash
 cd $NS3_ROOT/contrib/ai/examples/feddrl
-python3 train_ns3.py --aggregation none --price-beta 0.05 --seed 0 \
+python3 train_ns3.py \
+    --aggregation none --price-beta 0.05 --quantiles 8 --cvar-alpha 0.25 \
+    --seed 0 \
     --arrival-pps 60 --iterations 100 --rollout 32 --macro-slot-ms 20 \
     --load-spread 0.6 --deadline99-ms 20 --deadline999-ms 40 \
-    --ckpt-out $REPO_ROOT/results/my_run_s0.pt
+    --link2-width 40 --eps99 1e-2 --eps999 1e-3 \
+    --ckpt-out "$REPO_ROOT/results/lymappo_s0.pt" \
+    --train-log-csv "$REPO_ROOT/results/lymappo_s0_train.csv"
 ```
 
-See [docs/REPRODUCE.md](docs/REPRODUCE.md) for the full battery list,
-the settled protocol constants, expected wall-clock times, and the
-statistics conventions used to compare arms.
+Flag groups (see `--help` for everything):
+
+| Group | Flags |
+|---|---|
+| Protocol (keep fixed to compare with the tables above) | `--arrival-pps 60 --macro-slot-ms 20 --load-spread 0.6 --deadline99-ms 20 --deadline999-ms 40 --link2-width 40 --eps99 1e-2 --eps999 1e-3` |
+| Method — LyMAPPO full | `--aggregation none` (independent per-AP actors) + `--price-beta 0.05` (PX price coupling) + `--quantiles 8 --cvar-alpha 0.25` (QR tail critic) |
+| Method — ablations | `--price-beta 0` (no PX), `--no-lyapunov` (no-Z), `--lyapunov-v`, `--z-clip` |
+| Method — learned baselines | `--shared-actor` (MAPPO, one actor for all APs), `--cpo` (+`--cpo-kp/ki/kd`: independent PPO-Lagrangian) |
+| Method — federated arms | `--aggregation uniform\|zq\|iw\|hybrid\|qffl\|afl\|cluster` |
+| PPO knobs (paper defaults) | `--epochs 4 --gamma 0.99 --gae-lambda 0.95 --eps-clip 0.2 --lr-actor 3e-4 --lr-critic 1e-3` |
+| Outputs | `--ckpt-out` (best checkpoint by per-AP CMDP infeasibility score), `--train-log-csv` (per-iteration metrics) |
+
+### Step 3 — evaluate a policy
+
+Evaluation loads a checkpoint (or plays a built-in static policy) on
+**held-out channel seeds** and prints the KPI block at episode end:
+
+```bash
+cd $NS3_ROOT/contrib/ai/examples/feddrl
+# trained checkpoint — protocol and Z-constants MUST match training
+python3 feddrl.py --seed 10 --episode-ms 110000 --settle-ms 1000 \
+    --arrival-pps 60 --macro-slot-ms 20 --load-spread 0.6 \
+    --deadline99-ms 20 --deadline999-ms 40 --link2-width 40 \
+    --z-clip 10 --eps99 1e-2 --eps999 1e-3 \
+    --ckpt "$REPO_ROOT/results/lymappo_s0.pt" \
+    --baseline-tag lymappo_s0_es10 >> "$REPO_ROOT/results/my_eval.log"
+```
+
+Static baselines, same protocol flags:
+
+| Policy | Invocation |
+|---|---|
+| RSSI-greedy | `--policy rssi` |
+| SLCI (least-congested interface) | `--policy slci` |
+| Balanced round-robin | `--policy stub --balance-links` |
+
+`--episode-ms 110000` is the main protocol (~45 min wall-clock each);
+`11000` is the 10× shorter development protocol (~3 min; point
+estimates agree within 0.4 feasible APs). `--seed` selects the
+evaluation channel seed (the batteries use held-out seeds; seed 11 is
+excluded — known ns-3.40 PHY assertion). Diagnostics: `--metric-log`
+(per-slot vs. packet metric forms per AP), `--obs-dump` (per-slot
+encoded observations for offline analysis).
+
+### Step 4 — batteries, statistics, figures
+
+The `scripts/_*.sh` batteries wrap Steps 2–3 for every arm of the study
+(training matrix, seed extensions, ablations, federated arms, static
+baselines, load sweep, sensitivity sweeps, long re-evaluation) — the
+full list with what each produces is in
+[docs/REPRODUCE.md](docs/REPRODUCE.md). Then:
+
+```bash
+python3 -B scripts/_core_cmp_analyze.py results/<dir>   # seed-level mean±std + Mann-Whitney
+python3 -B scripts/figures/fig_results.py               # figures from results/ into figs/
+```
+
+The analyzers enforce the statistics conventions (seed as the
+statistical unit, no pooled tests, mean±std reporting) described in
+[docs/REPRODUCE.md](docs/REPRODUCE.md).
+
+### Step 5 — full reproduction
+
+Battery order for the complete study: `_final_matrix.sh` →
+`_seed_ext.sh` → ablation/federation arms (`_ab_arms.sh`,
+`_fairfl_arms.sh`, `_cluster_arm.sh`, `_noz_arm.sh`) → static baselines
+(`_slci_evals.sh`) → `_longeval.sh`/`_longeval2.sh` (110 s re-eval) →
+learned baselines (`_r3_baselines_full.sh`, `_r3_eval11s.sh`) →
+`_load_sweep.sh`, `_beta_sweep.sh`, `_alphak_sweep.sh`. Budget
+realistically: the full matrix is **multiple days** of wall-clock on a
+single many-core machine (each 110 s evaluation episode alone is
+~45 min); keep concurrent runs ≤ physical cores. Crash/seed exclusion
+rules are documented in [docs/REPRODUCE.md](docs/REPRODUCE.md).
 
 ## Representative results
 
