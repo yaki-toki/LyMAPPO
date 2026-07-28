@@ -1,15 +1,16 @@
-"""core_cmp Phase-B eval 집계: 사전등록 지표 산출.
+"""core_cmp Phase-B eval aggregation: computes the pre-registered metrics.
 
-지표 (판정 전 등록):
-  - worst-AP p999 (max over 16 APs)  — zq 메커니즘의 표적
-  - feasible AP 수 (p99<=1e-2 AND p999<=1e-3)
-  - hot-AP(0/4/8) p999 — stub-RR 이 못 맞추던 국소 tail
-  - 네트워크 p99/p999 (참고)
+Metrics (registered before any verdict):
+  - worst-AP p999 (max over 16 APs) -- the target of the zq mechanism
+  - number of feasible APs (p99<=1e-2 AND p999<=1e-3)
+  - hot-AP(0/4/8) p999 -- the local tail stub-RR could not meet
+  - network p99/p999 (for reference)
 
-집계 규칙 (다중시드 관례):
-  - 학습 arm: eval seed 3개 평균 → train seed 당 1값 → train seed 3개의 mean±std
-    (train-seed clustering 존중; pooled 9값 std 는 참고로만)
-  - baseline(RR/RSSI): eval seed 3개 mean±std
+Aggregation rules (multi-seed convention):
+  - learned arms: mean over 3 eval seeds -> 1 value per train seed -> mean+/-std
+    over 3 train seeds (respects train-seed clustering; the pooled 9-value std is
+    for reference only)
+  - baselines (RR/RSSI): mean+/-std over 3 eval seeds
 """
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ import re
 import statistics as st
 import sys
 
-# 결과 디렉터리를 인자로 받아 core_cmp(구 환경)와 newenv_cmp(새 환경) 겸용.
+# Takes the results directory as an argument, so it serves both core_cmp (old env)
+# and newenv_cmp (new env).
 RES = sys.argv[1] if len(sys.argv) > 1 else (
     "results/core_cmp")
 EPS99, EPS999 = 1e-2, 1e-3
@@ -82,7 +84,7 @@ def main() -> None:
                 bad.append(os.path.basename(path))
                 continue
             per_train.setdefault(ts, []).append(r)
-        # train-seed 당 eval-seed 평균 → train-seed 간 mean±std
+        # mean over eval seeds per train seed -> mean+/-std across train seeds
         agg = {m: [] for m in metrics}
         for ts, runs in sorted(per_train.items()):
             for m in metrics:
@@ -95,7 +97,7 @@ def main() -> None:
         per_arm_seed[arm] = agg
     for arm in ("rr", "rssi", "slci"):
         runs = []
-        # 구 환경(eval_*) / 새 환경(base_*) 파일명 겸용.
+        # Handles both the old-env (eval_*) and new-env (base_*) file names.
         paths = (sorted(glob.glob(f"{RES}/eval_{arm}_es*.txt"))
                  or sorted(glob.glob(f"{RES}/base_{arm}_es*.txt")))
         for path in paths:
@@ -110,14 +112,15 @@ def main() -> None:
     if bad:
         print(f"\nINCOMPLETE/CRASHED ({len(bad)}): " + ", ".join(bad))
 
-    # 시드 단위 Mann-Whitney U (양측): 학습 arm 은 train-seed 값(eval-seed 평균),
-    # baseline 은 eval-seed 값 — anticonservative pooling 금지 관례 준수.
+    # Seed-level Mann-Whitney U (two-sided): learned arms use train-seed values
+    # (mean over eval seeds), baselines use eval-seed values -- follows the
+    # convention that forbids anticonservative pooling.
     def _mwu(a: list[float], b: list[float]) -> float:
         try:
             from scipy.stats import mannwhitneyu  # type: ignore
             return float(mannwhitneyu(a, b, alternative="two-sided").pvalue)
         except Exception:
-            # 정규근사 (동률 무보정) — n>=8 에서 충분.
+            # Normal approximation (no tie correction) -- sufficient for n>=8.
             n1, n2 = len(a), len(b)
             u = sum(1 for x in a for y in b if x < y) \
                 + 0.5 * sum(1 for x in a for y in b if x == y)

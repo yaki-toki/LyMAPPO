@@ -1,7 +1,7 @@
-"""MAPPO 손실 + GAE advantage + Interference-weighted FedAvg aggregator.
+"""MAPPO loss + GAE advantage + Interference-weighted FedAvg aggregator.
 
-formulation 식 (10) - (11) 의 OBSS-가중 federated update 와
-Lemma 3 의 PPO clipping 모델을 구현.
+Implements the OBSS-weighted federated update of formulation eq. (10) - (11)
+and the PPO clipping model of Lemma 3.
 """
 from __future__ import annotations
 
@@ -50,9 +50,10 @@ def critic_loss(
 
 
 class InterferenceWeightedAggregator:
-    """formulation 식 (10): w_i = OBSS_i / sum_i OBSS_i, [w_lo, w_hi] clip.
+    """formulation eq. (10): w_i = OBSS_i / sum_i OBSS_i, [w_lo, w_hi] clip.
 
-    Assumption A4 (식 ass:weights) 의 [bar w / N_AP, hi w / N_AP] bound 강제.
+    Enforces the [bar w / N_AP, hi w / N_AP] bound of Assumption A4
+    (eq. ass:weights).
     """
 
     def __init__(
@@ -70,9 +71,10 @@ class InterferenceWeightedAggregator:
         if raw.sum() <= 0:
             return np.full(self.n_ap, 1.0 / self.n_ap)
         weights = raw / raw.sum()
-        # Bounded-simplex projection: 단순 clip 후 renormalize 는 bound 를
-        # 다시 깨뜨리므로, 잔여 질량을 여유 있는 성분에 비례 재분배하며
-        # sum=1 과 [lo, hi] 를 동시에 만족시킨다 (A4 실제 강제).
+        # Bounded-simplex projection: a plain clip followed by renormalize
+        # breaks the bound again, so the residual mass is redistributed in
+        # proportion to the slack of each component, satisfying sum=1 and
+        # [lo, hi] at the same time (actual A4 enforcement).
         for _ in range(self.n_ap + 1):
             weights = np.clip(weights, self.lo, self.hi)
             total = float(weights.sum())
@@ -102,10 +104,11 @@ class InterferenceWeightedAggregator:
 
 
 class UniformAggregator(InterferenceWeightedAggregator):
-    """Vanilla FedAvg: w_i = 1/N (du2024fedwifi 의 aggregation 방식).
+    """Vanilla FedAvg: w_i = 1/N (the aggregation scheme of du2024fedwifi).
 
-    C2 ablation 및 du2024fedwifi SOTA 재현용. compute_weights 만 OBSS 를
-    무시한 uniform 으로 override 하고, aggregate_grads 는 부모 클래스 재사용.
+    For the C2 ablation and for reproducing the du2024fedwifi SOTA. Only
+    compute_weights is overridden to a uniform weighting that ignores OBSS;
+    aggregate_grads is reused from the parent class.
     """
 
     def compute_weights(self, obss_per_ap: np.ndarray) -> np.ndarray:
@@ -113,13 +116,14 @@ class UniformAggregator(InterferenceWeightedAggregator):
 
 
 class QFFLAggregator(InterferenceWeightedAggregator):
-    """q-FFL (Li et al., ICLR 2020) 스타일 loss-가중 FedAvg — R2 비교군.
+    """q-FFL (Li et al., ICLR 2020) style loss-weighted FedAvg -- R2 baseline.
 
-    원 알고리즘의 클라이언트 손실 F_k 를 per-AP rollout 비용 (−평균 shaped
-    reward) 으로 대응: w_k ∝ (min-max 정규화 비용 + floor)^q. floor 는
-    최저-비용 클라이언트도 0 이 되지 않게 하는 q-FFL 의 성질을 보존한다.
-    공정성 (fair-FL) 지향 가중이므로 A4 clip 은 적용하지 않는다 (원 기법
-    충실성 우선).
+    The client loss F_k of the original algorithm is mapped to the per-AP
+    rollout cost (negative mean shaped reward): w_k proportional to
+    (min-max normalized cost + floor)^q. The floor preserves the q-FFL property
+    that even the lowest-cost client does not go to 0. Since this is a fairness
+    (fair-FL) oriented weighting, the A4 clip is not applied (fidelity to the
+    original method takes priority).
     """
 
     Q_POWER = 1.0
@@ -136,12 +140,12 @@ class QFFLAggregator(InterferenceWeightedAggregator):
 
 
 class AFLAggregator(InterferenceWeightedAggregator):
-    """AFL (Mohri et al., ICML 2019) 스타일 worst-client 가중 — R2 비교군.
+    """AFL (Mohri et al., ICML 2019) style worst-client weighting -- R2 baseline.
 
-    agnostic FL 의 mixture lambda 를 stochastic mirror ascent 로 갱신:
-    lambda_k <- lambda_k * exp(eta * 정규화 비용). 라운드가 지날수록 최악
-    클라이언트로 질량이 집중된다. 상태 (lambda) 를 라운드 간 유지하며,
-    원 기법 충실성을 위해 A4 clip 은 적용하지 않는다.
+    The mixture lambda of agnostic FL is updated by stochastic mirror ascent:
+    lambda_k <- lambda_k * exp(eta * normalized cost). As the rounds progress
+    the mass concentrates on the worst client. The state (lambda) is kept across
+    rounds and, for fidelity to the original method, the A4 clip is not applied.
     """
 
     ETA = 0.5
@@ -163,18 +167,20 @@ class AFLAggregator(InterferenceWeightedAggregator):
 def make_aggregator(mode: str, n_ap: int) -> InterferenceWeightedAggregator:
     """Aggregation mode -> aggregator instance.
 
-    - "iw"      : 실측 링크-overlap 가중 (CL 제출판 기법)
-    - "zq"      : 가상 큐(dual) 압력 가중 (WCL 개정 제안 기법, 옵션 B)
-    - "hybrid"  : overlap x (1 + Z) 곱 가중 (옵션 B')
+    - "iw"      : measured link-overlap weighting (CL submission method)
+    - "zq"      : virtual-queue (dual) pressure weighting (WCL revision
+                  proposal, option B)
+    - "hybrid"  : overlap x (1 + Z) product weighting (option B')
     - "uniform" : UniformAggregator (vanilla FedAvg / du2024fedwifi proxy)
-    - "qffl"    : q-FFL 스타일 loss-가중 (fair-FL 비교군)
-    - "afl"     : AFL 스타일 worst-client 가중 (fair-FL 비교군)
+    - "qffl"    : q-FFL style loss weighting (fair-FL baseline)
+    - "afl"     : AFL style worst-client weighting (fair-FL baseline)
 
-    zq/hybrid 는 measure 만 다르고 normalize + A4 clip 은 동일하므로
-    InterferenceWeightedAggregator 를 재사용한다 (measure 선택은
-    compute_agg_measure 가 담당). FedProx 는 본 학습 구조 (공유 actor 에서
-    epoch 마다 즉시 aggregation, local multi-step 없음) 에서 proximal 항이
-    항상 0 이라 FedAvg 와 동일해지므로 비교군에서 제외.
+    zq/hybrid differ only in the measure while normalize + A4 clip are the same,
+    so InterferenceWeightedAggregator is reused (the measure choice is handled
+    by compute_agg_measure). FedProx is excluded from the baselines because in
+    this training structure (immediate aggregation every epoch on a shared
+    actor, no local multi-step) the proximal term is always 0, which makes it
+    identical to FedAvg.
     """
     if mode in ("iw", "zq", "hybrid"):
         return InterferenceWeightedAggregator(n_ap)
@@ -192,9 +198,10 @@ def compute_obss_measure(
     n_ap: int,
     n_links: int,
 ) -> np.ndarray:
-    """각 AP 가 사용하는 link 의 다른 AP 와의 overlap 카운트 (식 9 단순화).
+    """Overlap count with other APs on the links each AP uses (eq. 9 simplified).
 
-    P4 골격 단계: alpha_{i'}^{tot} 대신 1.0 사용. P5 부터 env.cbr 의 실제 airtime 으로 가중.
+    P4 skeleton stage: 1.0 is used instead of alpha_{i'}^{tot}. From P5 on it is
+    weighted by the actual airtime from env.cbr.
     """
     ap_uses_link = np.zeros((n_ap, n_links), dtype=bool)
     for ap_id in range(n_ap):
@@ -212,12 +219,14 @@ def compute_obss_measure(
 
 
 def compute_z_measure(info: Dict, n_ap: int) -> np.ndarray:
-    """per-AP 가상 큐(dual 변수) 압력 measure: 1 + Z_i^(99) + Z_i^(99.9).
+    """per-AP virtual-queue (dual variable) pressure measure: 1 + Z_i^(99) + Z_i^(99.9).
 
-    Z 는 CMDP 제약의 dual 변수이므로 이 가중은 primal-dual 결합:
-    제약 위반이 누적된 AP 의 gradient 가 연합 update 에서 더 큰 몫을 갖는다.
-    전 AP 가 feasible (Z=0) 이면 1 벡터 -> uniform 으로 자연 회귀.
-    Z_per_ap_* 키가 없는 구버전 env info 에도 uniform 으로 동작.
+    Z is the dual variable of the CMDP constraint, so this weighting is a
+    primal-dual coupling: the gradient of an AP that has accumulated constraint
+    violations takes a larger share in the federated update. If every AP is
+    feasible (Z=0) the measure is the all-ones vector -> a natural fallback to
+    uniform. It also behaves as uniform on older env info that lacks the
+    Z_per_ap_* keys.
     """
     z99 = np.asarray(info.get("Z_per_ap_99", np.zeros(n_ap)), dtype=np.float32)
     z999 = np.asarray(info.get("Z_per_ap_99_9", np.zeros(n_ap)), dtype=np.float32)
@@ -232,14 +241,16 @@ def compute_agg_measure(
     n_links: int,
     cost_per_ap: np.ndarray | None = None,
 ) -> np.ndarray:
-    """aggregation mode -> 비균등 가중의 원천 measure.
+    """aggregation mode -> source measure of the non-uniform weighting.
 
-    - "iw"      : 직전 rollout 의 실측 링크-overlap (compute_obss_measure)
-    - "zq"      : 가상 큐 압력 1 + Z (compute_z_measure)
-    - "hybrid"  : overlap x (1 + Z) 곱
-    - "uniform" : 1 벡터 (UniformAggregator 가 무시하므로 값 무관)
-    - "qffl"/"afl": per-AP rollout 비용 (−평균 shaped reward) 원본 전달 —
-      변환은 해당 aggregator 의 compute_weights 가 담당
+    - "iw"      : measured link-overlap of the previous rollout
+                  (compute_obss_measure)
+    - "zq"      : virtual-queue pressure 1 + Z (compute_z_measure)
+    - "hybrid"  : overlap x (1 + Z) product
+    - "uniform" : all-ones vector (value irrelevant, UniformAggregator ignores it)
+    - "qffl"/"afl": the raw per-AP rollout cost (negative mean shaped reward) is
+      passed through -- the transform is handled by the compute_weights of that
+      aggregator
     """
     if mode == "iw":
         return compute_obss_measure(last_actions, n_ap, n_links)
@@ -254,6 +265,6 @@ def compute_agg_measure(
         return np.ones(n_ap, dtype=np.float32)
     if mode in ("qffl", "afl"):
         if cost_per_ap is None:
-            raise ValueError(f"{mode!r} aggregation 은 cost_per_ap 가 필요")
+            raise ValueError(f"{mode!r} aggregation requires cost_per_ap")
         return np.asarray(cost_per_ap, dtype=np.float32)
     raise ValueError(f"unknown aggregation measure mode: {mode!r}")

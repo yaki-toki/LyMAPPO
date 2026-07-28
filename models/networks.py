@@ -1,18 +1,19 @@
 """Actor / Critic MLP + state encoding / action decoding helpers.
 
-formulation 의 Section IV (CTDE) 에 대응:
+Corresponds to Section IV (CTDE) of the formulation:
 - Actor (decentralized): per-AP local state -> (link logits, map_mode logits)
 - Critic (centralized): joint state -> scalar value (training only)
 
-State 인코딩 (per AP):
+State encoding (per AP):
     csi (n_sta, n_links) + queue (n_sta, n_links, 4) + hol_age (n_sta, n_links)
     + cbr (n_links,) + Z_99 (n_sta,) + Z_99_9 (n_sta,) -> 1-D float vector
 
-Action 디코딩 (per AP):
+Action decoding (per AP):
     logits = (n_sta * n_links + n_map_modes,) ->
-        per-STA link 선택 (categorical) + map_mode (categorical)
-    환경 action dict 의 EDCA / AMPDU / link_active 는 default 값 + sampled link 의
-    one-hot 으로 결정. P4 후속 단계에서 EDCA 도 학습 대상으로 확장 예정.
+        per-STA link selection (categorical) + map_mode (categorical)
+    EDCA / AMPDU / link_active in the environment action dict are set from the
+    default values plus the one-hot of the sampled link. A later P4 stage will
+    extend EDCA to be learned as well.
 """
 from __future__ import annotations
 
@@ -35,22 +36,24 @@ N_MAP_MODES = 3  # none / Co-TDMA / Co-OFDMA
 AMPDU_FIXED = 16
 
 
-# P6 (obs 정규화): persist 학습 + 정직한 회계에서는 buffer 길이가 수천,
-# HOL age 가 수백 ms 까지 자라므로 raw 값은 MLP 를 포화시키고 train/eval
-# 분포를 어긋나게 한다. 큐는 log1p (heavy-tail 압축), HOL 은 deadline 단위,
-# Z 는 z_clip 단위로 정규화한다. csi/cbr 은 원래 소규모라 유지.
-# ★드라이버(train_ns3.py/feddrl.py)는 시작 시 CLI 값으로 이 둘을 덮어써
-# 정규화가 실제 deadline999/z_clip 을 추적하게 한다 (P1/P6 수정: 구 Z_NORM=100
-# 은 z_clip=10 과 10× 불일치 → actor 가 Z 를 [0,0.1] 로만 봤음).
-HOL_NORM_S = 1e-2   # 기본 L^(99.9) = 10 ms; 드라이버가 deadline999 로 덮어씀
-Z_NORM = 10.0       # 기본 z_clip = 10;   드라이버가 --z-clip 으로 덮어씀
+# P6 (obs normalization): with persistent training + honest accounting the
+# buffer length reaches thousands and the HOL age grows to hundreds of ms, so
+# raw values saturate the MLP and skew the train/eval distributions. The queue
+# is normalized with log1p (heavy-tail compression), HOL in deadline units and
+# Z in z_clip units. csi/cbr are already small-scale and are kept as is.
+# NOTE: the drivers (train_ns3.py/feddrl.py) overwrite these two with the CLI
+# values at startup so the normalization tracks the actual deadline999/z_clip
+# (P1/P6 fix: the old Z_NORM=100 was a 10x mismatch with z_clip=10, so the
+# actor only ever saw Z in [0,0.1]).
+HOL_NORM_S = 1e-2   # default L^(99.9) = 10 ms; driver overwrites with deadline999
+Z_NORM = 10.0       # default z_clip = 10;   driver overwrites with --z-clip
 
 
 def encode_obs(obs_ap: Dict[str, np.ndarray]) -> np.ndarray:
-    """per-AP obs dict -> flat float32 vector (P6: 정규화, P7: link_mask).
+    """per-AP obs dict -> flat float32 vector (P6: normalization, P7: link_mask).
 
-    link_mask 가 없는 구형 obs (예: 갱신 전 ns-3 bridge) 는 전 링크 사용
-    가능 (대칭) 으로 간주한다.
+    Legacy obs without link_mask (e.g. a pre-update ns-3 bridge) is treated as
+    having every link available (symmetric).
     """
     cbr = obs_ap["cbr"].ravel().astype(np.float32)
     link_mask = obs_ap.get("link_mask")
@@ -63,21 +66,22 @@ def encode_obs(obs_ap: Dict[str, np.ndarray]) -> np.ndarray:
         cbr,
         obs_ap["Z_99"].ravel().astype(np.float32) / Z_NORM,
         obs_ap["Z_99_9"].ravel().astype(np.float32) / Z_NORM,
-        link_mask.ravel().astype(np.float32),  # P7: AP 의 링크 집합 K_i
+        link_mask.ravel().astype(np.float32),  # P7: link set K_i of the AP
     ]
     return np.concatenate(parts)
 
 
 def encode_joint(obs: Dict[int, Dict[str, np.ndarray]]) -> np.ndarray:
-    """모든 AP 의 obs 를 concat 한 joint state (centralized critic 입력)."""
+    """Joint state concatenating the obs of every AP (centralized critic input)."""
     return np.concatenate([encode_obs(obs[ap]) for ap in sorted(obs.keys())])
 
 
 def mask_link_logits(logits: torch.Tensor, link_mask, n_sta: int,
                      n_links: int) -> torch.Tensor:
-    """per-AP 링크집합 K_i 강제: 비허용 링크 logit 을 큰 음수로 눌러 정책이
-    그 밴드를 절대 선택하지 않게 한다. 학습(train_ns3)과 평가(feddrl.py)가
-    반드시 같은 마스킹을 써야 train/eval 행동분포가 일치한다 (P3 수정).
+    """Enforce the per-AP link set K_i: push disallowed link logits to a large
+    negative value so the policy never selects those bands. Training (train_ns3)
+    and evaluation (feddrl.py) must use the same masking for the train/eval
+    action distributions to match (P3 fix).
     logits: (..., n_sta*n_links + N_MAP_MODES)."""
     out = logits.clone()
     lead = out.shape[:-1]
@@ -90,9 +94,10 @@ def mask_link_logits(logits: torch.Tensor, link_mask, n_sta: int,
 
 def mask_map_logits(logits: torch.Tensor, n_sta: int, n_links: int,
                     n_map_modes: int) -> torch.Tensor:
-    """map_mode 를 0(no coord)으로 동결: mode 1..K-1 logit 을 큰 음수로.
-    (Co-TDMA 는 16× 직렬화 붕괴, Co-OFDMA 는 현 시나리오서 no-op — 학습·평가
-    동일 지점에 적용해 행동분포 일치를 보장한다.)"""
+    """Freeze map_mode to 0 (no coord): push the mode 1..K-1 logits to a large
+    negative value. (Co-TDMA collapses under 16x serialization, Co-OFDMA is a
+    no-op in the current scenario -- applied at the same point in training and
+    evaluation to guarantee matching action distributions.)"""
     out = logits.clone()
     base = n_sta * n_links
     if n_map_modes > 1:
@@ -210,13 +215,14 @@ class LSTMActorWrapper(nn.Module):
 
 
 class CriticMLP(nn.Module):
-    """centralized critic — joint state -> V(s) (n_heads=1, 하위호환) 또는
-    per-AP 가치 벡터 V_i(s) (n_heads=N_AP).
+    """centralized critic -- joint state -> V(s) (n_heads=1, backward compatible)
+    or the per-AP value vector V_i(s) (n_heads=N_AP).
 
-    F10 (P4 수정): 단일 스칼라 V 가 cross-AP 평균 return 을 예측하면 per-AP
-    GAE 의 bootstrap 항이 자기 AP 보상과 어긋나 — 이질 부하(load-spread>0)
-    에서 advantage 가 정확히 편향된다. per-AP head 는 CTDE(joint 입력)를
-    유지하면서 각 AP 의 baseline 을 분리한다."""
+    F10 (P4 fix): if a single scalar V predicts the cross-AP mean return, the
+    bootstrap term of the per-AP GAE is misaligned with that AP's own reward --
+    the advantage is biased exactly under heterogeneous load (load-spread>0).
+    The per-AP head keeps CTDE (joint input) while separating the baseline of
+    each AP."""
 
     def __init__(self, joint_state_dim: int, hidden: int = 64,
                  n_heads: int = 1, n_quantiles: int = 1) -> None:
@@ -234,7 +240,7 @@ class CriticMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.net(x)
         if self.n_quantiles > 1:
-            # QR critic (B): (..., n_heads, K) — head 별 return 분위수.
+            # QR critic (B): (..., n_heads, K) -- per-head return quantiles.
             return out.view(*out.shape[:-1], self.n_heads, self.n_quantiles)
         return out.squeeze(-1) if self.n_heads == 1 else out
 
@@ -246,7 +252,7 @@ def sample_action(
     rng: np.random.Generator,
     deterministic: bool = False,
 ) -> Tuple[Dict, Dict[str, np.ndarray], float]:
-    """Categorical sampling: 각 STA 링크 + map_mode."""
+    """Categorical sampling: per-STA link + map_mode."""
     logits_np = logits.detach().cpu().numpy().astype(np.float64)
     link_logits = logits_np[: n_sta * n_links].reshape(n_sta, n_links)
     map_logits = logits_np[n_sta * n_links : n_sta * n_links + N_MAP_MODES]
@@ -300,7 +306,7 @@ def log_prob_of(
     n_sta: int,
     n_links: int,
 ) -> torch.Tensor:
-    """배치 log-prob 재계산 (PPO ratio 계산용). logits: (B, action_dim)."""
+    """Batched log-prob recomputation (for the PPO ratio). logits: (B, action_dim)."""
     link_logits = logits[..., : n_sta * n_links].view(-1, n_sta, n_links)
     map_logits = logits[..., n_sta * n_links : n_sta * n_links + N_MAP_MODES]
 

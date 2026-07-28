@@ -1,8 +1,8 @@
-"""v3 G5: 부하 스윕 곡선 (feasible + net p99 vs lambda) — graceful degradation.
+"""v3 G5: load sweep curves (feasible + net p99 vs lambda) -- graceful degradation.
 
-입력: results/final_l2w40 (lambda=60), results/sweep_l40, results/sweep_l80
-출력: docs/v3/figs/fig_sweep.{png,pdf}
-통계단위: 학습 arm=train-seed(eval-seed 평균), baseline=eval-seed.
+Input: results/final_l2w40 (lambda=60), results/sweep_l40, results/sweep_l80
+Output: docs/v3/figs/fig_sweep.{png,pdf}
+Statistical unit: learned arm=train-seed (mean over eval seeds), baseline=eval-seed.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _parse(path):
 
 
 def seed_stats(res, arm):
-    """(feasible mean, std, netp99 mean, std, n) — 시드수준."""
+    """(feasible mean, std, netp99 mean, std, n) -- seed level."""
     groups = {}
     if arm == "pxqr":
         for p in sorted(glob.glob(f"{res}/eval_pxqr_ts*_es*.txt")):

@@ -1,30 +1,32 @@
 """train_ns3.py — ns-3-in-the-loop federated MAPPO trainer (redesign).
 
-설계 전환: Python surrogate 를 제거하고 ns-3 를 직접 RL 환경으로 사용한다.
-실제 동작 (802.11 PHY/MAC, packet-level DES) = ns-3, 학습 (PPO + federated
-aggregation) = Python. 두 환경은 ns3-ai 셰어드 메모리로 연동한다.
+Design shift: the Python surrogate is removed and ns-3 is used directly as the
+RL environment. Actual behavior (802.11 PHY/MAC, packet-level DES) = ns-3,
+learning (PPO + federated aggregation) = Python. The two sides are coupled
+through ns3-ai shared memory.
 
-기존 ``feddrl.py`` (eval-only driver) 와 동일한 EnvMsg/ActMsg 인터페이스,
-동일한 obs 스키마 (csi/queue/hol_age/cbr/Z_99/Z_99_9/link_mask), 동일한
-Lyapunov dual 갱신을 재사용한다. 새로 추가되는 것은 rollout 수집 + per-AP
-reward 계산뿐이며, GAE/PPO/aggregation 은 ``models.mappo`` 를 100% 재사용한다.
+The same EnvMsg/ActMsg interface as the existing ``feddrl.py`` (eval-only
+driver), the same obs schema (csi/queue/hol_age/cbr/Z_99/Z_99_9/link_mask) and
+the same Lyapunov dual update are reused. Only rollout collection + per-AP
+reward computation are new; GAE/PPO/aggregation reuse ``models.mappo`` 100%.
 
-MDP 정렬 (drift-plus-penalty):
-    read k 의 EnvMsg 는 slot (k-1) — 즉 직전 action a_{k-1} — 의 served/violation
-    을 담고 있다. 따라서
+MDP alignment (drift-plus-penalty):
+    The EnvMsg of read k carries the served/violation counts of slot (k-1),
+    i.e. of the previous action a_{k-1}. Therefore
         g_{k-1} = (v_{k-1} - eps * served_{k-1}) / N_STA
         r_{k-1} = V * u_{k-1} - Z_{k-1} · g_{k-1}      (PRE-update dual)
         Z_k     = clip(Z_{k-1} + g_{k-1}, 0, z_clip)   (dual ascent)
-    obs_k 에는 갱신된 Z_k 가 실린다. transition 은
-        (obs_{k-1}[Z_{k-1}], a_{k-1}, r_{k-1}, obs_k[Z_k]) 로 정합한다.
+    obs_k carries the updated Z_k. A transition is assembled as
+        (obs_{k-1}[Z_{k-1}], a_{k-1}, r_{k-1}, obs_k[Z_k]).
 
-액션 공간 v1 = link + mode:
-    per-STA link 선택 (학습) + 단일 global map_mode (ActMsg 가 하나만 지원 →
-    per-AP 샘플의 다수결로 실행). PPO ratio 는 per-AP 샘플 map_mode 로 계산하여
-    일관성을 유지한다 (실행은 다수결). per-AP 개별 mode 는 struct 확장이 필요한
-    v2 과제로 남긴다.
+Action space v1 = link + mode:
+    per-STA link selection (learned) + a single global map_mode (ActMsg
+    supports only one, so the per-AP samples are executed by majority vote).
+    The PPO ratio is computed with each AP's own sampled map_mode to stay
+    consistent (execution uses the majority vote). Per-AP individual modes
+    need a struct extension and are left as a v2 task.
 
-실행 (WSL Ubuntu, ns-3 example 디렉터리 안에서):
+Execution (WSL Ubuntu, inside the ns-3 example directory):
     PYTHONDONTWRITEBYTECODE=1 python3 -B train_ns3.py \
         --aggregation zq --seed 0 --arrival-pps 5500 \
         --iterations 200 --rollout 64 \
@@ -46,13 +48,14 @@ N_STA_PER_AP = 5
 N_LINKS = 3
 EPS_99 = 1e-2
 EPS_999 = 1e-3
-MACRO_SLOT_MS = 5.0  # feddrl_scenario.cc kMacroSlot 와 일치해야 함.
+MACRO_SLOT_MS = 5.0  # Must match kMacroSlot in feddrl_scenario.cc.
 
 
 def _mask_link_logits(logits: Any, link_mask: Any, n_sta: int,
                       n_links: int) -> Any:
-    """models.networks.mask_link_logits 위임 — 학습·평가가 단일 구현을 공유해야
-    train/eval 행동분포가 일치한다 (P3 수정; 상세 docstring 은 networks.py)."""
+    """Delegates to models.networks.mask_link_logits -- train and eval share a
+    single implementation so their action distributions match (P3 fix; full
+    docstring in networks.py)."""
     from models.networks import mask_link_logits  # type: ignore
 
     return mask_link_logits(logits, link_mask, n_sta, n_links)
@@ -60,7 +63,8 @@ def _mask_link_logits(logits: Any, link_mask: Any, n_sta: int,
 
 def _mask_map_logits(logits: Any, n_sta: int, n_links: int,
                      n_map_modes: int) -> Any:
-    """models.networks.mask_map_logits 위임 (P3 수정; 상세는 networks.py)."""
+    """Delegates to models.networks.mask_map_logits (P3 fix; details in
+    networks.py)."""
     from models.networks import mask_map_logits  # type: ignore
 
     return mask_map_logits(logits, n_sta, n_links, n_map_modes)
@@ -71,76 +75,102 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--aggregation", type=str, default="zq",
                    choices=["none", "uniform", "zq", "iw", "hybrid",
                             "qffl", "afl", "cluster"],
-                   help="none=독립 local actor (FedAvg 없음); cluster=이질성-"
-                        "인지 연합(같은 링크집합 K_i 그룹끼리만 uniform FedAvg "
-                        "— cross-K 특화 파괴 진단에서 도출된 처방); 나머지는 "
-                        "전역 가중 FedAvg 방식.")
+                   help="none=independent local actors (no FedAvg); "
+                        "cluster=heterogeneity-aware federation (uniform "
+                        "FedAvg only within groups sharing the same link set "
+                        "K_i -- prescribed by the diagnosis that cross-K "
+                        "averaging destroys specialization); the others are "
+                        "global weighted FedAvg variants.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--arrival-pps", type=float, default=5500.0)
     p.add_argument("--iterations", type=int, default=200,
-                   help="PPO update 횟수 (각 update 는 --rollout slot 소비).")
+                   help="PPO update count (each update consumes --rollout "
+                        "slots).")
     p.add_argument("--rollout", type=int, default=64,
-                   help="update 당 매크로 슬롯 수.")
+                   help="Macro slots consumed per update.")
     p.add_argument("--allow-coord", action="store_true",
-                   help="map_mode(Co-TDMA/OFDMA) 탐색 허용. 기본 off = mode0 "
-                        "동결. 16-AP dense 에서 Co-TDMA 는 16× 직렬화로 백로그를 "
-                        "폭발시켜 sim 을 붕괴시키고 지연에도 무용하므로 기본 동결.")
+                   help="Allow map_mode (Co-TDMA/OFDMA) exploration. Default "
+                        "off = frozen at mode0. In the 16-AP dense setting "
+                        "Co-TDMA serializes 16x, exploding the backlog and "
+                        "collapsing the sim while giving no delay benefit, so "
+                        "it stays frozen by default.")
     p.add_argument("--macro-slot-ms", type=float, default=20.0,
-                   help="RL 결정+측정 창 길이(ms). 길수록 슬롯당 패킷 수가 많아 "
-                        "reward/Z 분산이 낮아진다. ns-3 scenario 로 전달된다.")
+                   help="RL decision+measurement window length (ms). Longer "
+                        "windows carry more packets per slot, lowering "
+                        "reward/Z variance. Forwarded to the ns-3 scenario.")
     p.add_argument("--epochs", type=int, default=4)
     p.add_argument("--lyapunov-v", type=float, default=1.0,
-                   help="drift-plus-penalty 의 utility 가중 V.")
+                   help="Utility weight V in drift-plus-penalty.")
     p.add_argument("--eps99", type=float, default=1e-2,
-                   help="99% 지연 위반율 목표 (P(delay>deadline99) ≤ eps99). 목표가 "
-                        "달성가능 영역이어야 Z 가 이질적으로 살아있어 zq 가중이 "
-                        "의미를 갖는다 (Slater 가정 A5).")
+                   help="99% delay violation-rate target "
+                        "(P(delay>deadline99) <= eps99). The target must lie "
+                        "in the achievable region so that Z stays alive and "
+                        "heterogeneous, which is what makes the zq weighting "
+                        "meaningful (Slater assumption A5).")
     p.add_argument("--eps999", type=float, default=1e-3,
-                   help="99.9% 지연 위반율 목표 (P(delay>deadline999) ≤ eps999).")
+                   help="99.9% delay violation-rate target "
+                        "(P(delay>deadline999) <= eps999).")
     p.add_argument("--deadline99-ms", type=float, default=5.0,
-                   help="p99 데드라인(ms). 밀도-스케일: 4-AP=5, 16-AP dense=10 "
-                        "(구조적 tail 바닥이 밀도와 함께 커짐). ns-3 로 전달.")
+                   help="p99 deadline (ms). Density-scaled: 4-AP=5, 16-AP "
+                        "dense=10 (the structural tail floor grows with "
+                        "density). Forwarded to ns-3.")
     p.add_argument("--deadline999-ms", type=float, default=10.0,
-                   help="p99.9 데드라인(ms). 4-AP=10, 16-AP dense=20. ns-3 로 전달.")
+                   help="p99.9 deadline (ms). 4-AP=10, 16-AP dense=20. "
+                        "Forwarded to ns-3.")
     p.add_argument("--load-spread", type=float, default=0.0,
-                   help="AP별 부하 이질성 [0,1]. 0=동종(전 AP arrivalPps). >0 이면 "
-                        "AP0=arrivalPps ~ AP15=(1-load_spread)*arrivalPps 선형 gradient "
-                        "→ per-AP 제약압력(Z) 이질화(연합/zq 검증 조건). ns-3 로 전달. "
-                        "평가도 동일 값이어야 함.")
+                   help="Per-AP load heterogeneity in [0,1]. 0=homogeneous "
+                        "(arrivalPps for every AP). >0 gives a linear gradient "
+                        "AP0=arrivalPps ~ AP15=(1-load_spread)*arrivalPps -> "
+                        "heterogeneous per-AP constraint pressure (Z), the "
+                        "precondition for validating federation/zq. Forwarded "
+                        "to ns-3. Evaluation must use the same value.")
     p.add_argument("--seg-suffix", type=str, default="",
-                   help="ns3-ai 공유메모리 객체 이름의 런별 고유 suffix. 동시 실행 "
-                        "학습 잡마다 다른 값을 주어 세그먼트 충돌을 막는다(병렬화). "
-                        "빈 값=라이브러리 기본(단일 실행). ns-3 와 이름이 일치해야 함.")
+                   help="Per-run unique suffix for the ns3-ai shared-memory "
+                        "object names. Give each concurrent training job a "
+                        "different value to avoid segment collisions "
+                        "(parallelism). Empty = library default (single run). "
+                        "Must match the name used on the ns-3 side.")
     p.add_argument("--chan-dwell-ms", type=float, default=200.0,
-                   help="F6 Markov 채널 평균 상태 체류(ms); 0=정적(레거시). "
-                        "ns-3 로 전달. 평가(feddrl.py)와 동일 값이어야 함.")
+                   help="F6 Markov channel mean state dwell time (ms); "
+                        "0=static (legacy). Forwarded to ns-3. Evaluation "
+                        "(feddrl.py) must use the same value.")
     p.add_argument("--het-bands", type=int, default=1,
-                   help="F7 이질 밴드(2.4/5/6GHz, 20/40/80MHz); 0=레거시. "
-                        "ns-3 로 전달. 평가와 동일 값이어야 함.")
+                   help="F7 heterogeneous bands (2.4/5/6GHz, 20/40/80MHz); "
+                        "0=legacy. Forwarded to ns-3. Evaluation must use the "
+                        "same value.")
     p.add_argument("--link2-width", type=int, default=80,
-                   help="link2(6GHz) 채널폭 MHz: 80(기본)|40. ns-3 전달, 평가 일치 필수.")
+                   help="link2 (6GHz) channel width in MHz: 80 (default)|40. "
+                        "Forwarded to ns-3; evaluation must match.")
     p.add_argument("--drain-target", type=int, default=8,
-                   help="F8 공유버퍼 drain-on-demand per-link MAC 큐 목표 깊이; "
-                        "0=direct-send 레거시. ns-3 로 전달, 평가와 동일 필수.")
+                   help="F8 shared-buffer drain-on-demand target depth of the "
+                        "per-link MAC queue; 0=direct-send legacy. Forwarded "
+                        "to ns-3; evaluation must match.")
     p.add_argument("--price-beta", type=float, default=0.0,
-                   help="가격-결합(PX): 이웃 AP 의 dual(Z99+Z999)을 밴드별 "
-                        "혼잡가격으로 보상에 결합 — r_i -= beta * sum_k "
-                        "usage_{i,k} * price_k^{-i}. 네트워크 라그랑지안의 "
-                        "교차항(공유밴드 airtime 외부효과) 1차 복원. 0=off.")
+                   help="Price coupling (PX): folds the neighboring APs' dual "
+                        "(Z99+Z999) into the reward as a per-band congestion "
+                        "price -- r_i -= beta * sum_k usage_{i,k} * "
+                        "price_k^{-i}. First-order restoration of the cross "
+                        "term of the network Lagrangian (shared-band airtime "
+                        "externality). 0=off.")
     p.add_argument("--quantiles", type=int, default=0,
-                   help="QR critic(B): per-AP head 당 분위수 개수(0=스칼라 "
-                        "레거시). 분위 회귀(pinball)로 return 분포를 학습.")
+                   help="QR critic (B): number of quantiles per per-AP head "
+                        "(0=scalar legacy). Learns the return distribution by "
+                        "quantile (pinball) regression.")
     p.add_argument("--cvar-alpha", type=float, default=0.25,
-                   help="QR critic 사용 시 actor advantage 의 baseline 을 "
-                        "하위 alpha 분위 평균(CVaR)으로 — 최악-경로 return "
-                        "(tail 위반 스파이크 지배)을 우선 개선.")
+                   help="With the QR critic, use the mean of the lowest alpha "
+                        "quantiles (CVaR) as the actor advantage baseline -- "
+                        "prioritizes improving the worst-case returns "
+                        "(dominated by tail violation spikes).")
     p.add_argument("--no-lyapunov", action="store_true",
-                   help="ablation: Lyapunov 제약 결합 제거 — 보상=V·u 만(Z 벌점 "
-                        "없음), obs 의 Z 특징 0 고정. 'Z 메커니즘이 UHR 달성의 "
-                        "필수 요소인가'를 분리 검정 (리뷰어 필수 질문).")
+                   help="ablation: drop the Lyapunov constraint coupling -- "
+                        "reward = V*u only (no Z penalty), Z features in obs "
+                        "pinned to 0. Isolates the question 'is the Z "
+                        "mechanism necessary to achieve UHR?' (a mandatory "
+                        "reviewer question).")
     p.add_argument("--z-clip", type=float, default=10.0,
-                   help="dual 변수 Z 상한. rate-form drift(≤1/슬롯) 기준 10 이면 "
-                        "충분하며 reward 스케일을 학습가능 범위로 유지한다.")
+                   help="Upper bound on the dual variable Z. With the "
+                        "rate-form drift (<=1 per slot) 10 is enough and keeps "
+                        "the reward scale within a learnable range.")
     p.add_argument("--shared-actor", action="store_true",
                    help="#7 MAPPO baseline: ONE actor shared across all 16 APs "
                         "(parameter sharing), trained on POOLED experience with the "
@@ -170,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "1 rollout + args.epochs local PPO epochs). 1 = every "
                         "round. Ignored for aggregation=none (never aggregates).")
     p.add_argument("--episode-ms", type=float, default=0.0,
-                   help="0 이면 iterations·rollout 에서 자동 산출.")
+                   help="0 = derived automatically from iterations * rollout.")
     p.add_argument("--ns3-path", type=str, default="../../../../")
     p.add_argument("--repo-root", type=str, default=os.environ.get("REPO_ROOT", "."))
     p.add_argument("--device", type=str, default="cpu")
@@ -194,12 +224,13 @@ def _ns3_obs_and_reward(
     lam999: np.ndarray | None = None,
 ) -> Tuple[List[Dict[str, np.ndarray]], np.ndarray, np.ndarray, np.ndarray,
            np.ndarray, np.ndarray, np.ndarray]:
-    """EnvMsg → (per-AP obs dict 리스트, reward, 갱신 Z99, 갱신 Z999, served,
-    v99, v999).
+    """EnvMsg -> (list of per-AP obs dicts, reward, updated Z99, updated Z999,
+    served, v99, v999).
 
-    reward 는 PRE-update dual (z99/z999 인자) 로, obs 의 Z 는 POST-update 로
-    채운다 (drift-plus-penalty 정렬). 모든 카운트는 per-STA 크기로 정규화한다
-    (feddrl.py / wlan_env.step 와 동일).
+    reward uses the PRE-update duals (the z99/z999 arguments) while the Z in
+    obs is filled with the POST-update values (drift-plus-penalty alignment).
+    All counts are normalized by the per-STA size (same as feddrl.py /
+    wlan_env.step).
     """
     queue_len = np.frombuffer(env_msg.queueLen(), dtype=np.uint32).reshape(
         N_AP, N_STA_PER_AP).astype(np.float32)
@@ -211,33 +242,37 @@ def _ns3_obs_and_reward(
     v99 = np.frombuffer(env_msg.violation99(), dtype=np.uint32).astype(np.float32)
     v999 = np.frombuffer(env_msg.violation999(), dtype=np.uint32).astype(np.float32)
     dropped = np.frombuffer(env_msg.dropped(), dtype=np.uint32).astype(np.float32)
-    # CSI: ns-3 물리 채널이 소유·측정한 per-STA-per-link 품질을 obs 로 받는다
-    # (해석식 재유도 없음). shape (N_AP, N_STA_PER_AP, N_LINKS).
+    # CSI: the per-STA-per-link quality owned and measured by the ns-3 physical
+    # channel is taken as obs (no analytical re-derivation).
+    # shape (N_AP, N_STA_PER_AP, N_LINKS).
     csi_all = np.frombuffer(env_msg.csi(), dtype=np.float32).reshape(
         N_AP, N_STA_PER_AP, N_LINKS)
 
-    # 제약은 rate 형 (eq:uhr): P(delay>L) ≤ eps, per-slot 분모 decided =
-    # served + dropped (dropped = MaxDelay=deadline999 aged-out + queue-full;
-    # ns-3 가 EnvMsg.dropped 로 보고). 드롭 패킷은 두 deadline 을 모두 놓친
-    # 위반이므로 v 에 포함 — eq:uhr 의 "decided = served or aged out" 를
-    # per-slot 에서 성립시켜 dual 신호의 survivor-bias 를 제거한다 (E1 수정).
-    # rate 형 drift 는 O(1) 유계로 카운트형(포화 시 Z 폭발)보다 안정적이며
-    # per-패킷 rate 제약에 충실하다 (논문 eq:queue 를 rate 형으로 재서술 예정).
+    # The constraint is in rate form (eq:uhr): P(delay>L) <= eps, with the
+    # per-slot denominator decided = served + dropped (dropped = MaxDelay=
+    # deadline999 aged-out + queue-full; reported by ns-3 as EnvMsg.dropped).
+    # Dropped packets missed both deadlines, so they count as violations in v
+    # -- this makes the "decided = served or aged out" of eq:uhr hold per slot
+    # and removes the survivor bias from the dual signal (E1 fix). The
+    # rate-form drift is O(1)-bounded, hence more stable than the count form
+    # (Z explodes under saturation), and is faithful to the per-packet rate
+    # constraint (eq:queue in the paper is to be restated in rate form).
     decided = np.maximum(served + dropped, 1.0)
     g99 = (v99 + dropped) / decided - eps99
     g999 = (v999 + dropped) / decided - eps999
-    utility = served / N_STA_PER_AP            # delivered throughput (drop 무이득)
+    utility = served / N_STA_PER_AP            # delivered throughput (no gain on drop)
     if no_lyap:
-        # ablation: 제약 결합 제거 — 순수 throughput 보상. Z 는 진단용으로만
-        # 갱신하고 보상·obs 에서 배제 (obs 는 아래에서 0 고정).
+        # ablation: constraint coupling removed -- pure throughput reward. Z is
+        # still updated for diagnostics only and excluded from the reward and
+        # from obs (obs is pinned to 0 below).
         reward = v_weight * utility
     elif cpo:
         # CPO / constrained-PPO baseline (#7): conventional Lagrangian on the
         # SAME UHR constraint but with a per-AP multiplier λ that is (a) FIXED
         # within the rollout and updated per-ITERATION by a PID controller on
         # the episodic mean violation (NOT the per-slot clipped drift of ours),
-        # and (b) NOT part of the observation (obs Z 특징 0 고정, no_lyap 와
-        # 동일). Per-slot penalty uses the UN-normalized drift g (same scale as
+        # and (b) NOT part of the observation (obs Z pinned to 0, as in
+        # no_lyap). Per-slot penalty uses the UN-normalized drift g (same scale as
         # our reward, so λ·g ~ O(utility) at a violation and the critic target
         # stays well-conditioned); λ itself adapts on the budget-NORMALIZED
         # aggregate violation (train loop) so the p99/p999 duals both reach a
@@ -298,10 +333,11 @@ def collect_rollout_ns3(
     lam99: np.ndarray | None = None,
     lam999: np.ndarray | None = None,
 ) -> Dict[str, Any]:
-    """ns-3 스트림에서 rollout 개의 (state, action, reward) transition 을 모은다.
+    """Collect rollout (state, action, reward) transitions from the ns-3 stream.
 
-    rollout+1 회 read 하여 마지막 read 는 GAE bootstrap obs 로만 쓴다. reward
-    r_{k-1} 은 read k 에서 계산되어 직전 read 의 action 에 귀속된다.
+    Reads rollout+1 times; the last read is used only as the GAE bootstrap obs.
+    The reward r_{k-1} is computed at read k and attributed to the action of
+    the previous read.
     """
     import torch  # type: ignore
 
@@ -318,11 +354,13 @@ def collect_rollout_ns3(
     v999_acc = np.zeros(N_AP, dtype=np.float64)
     dropped_acc = np.zeros(N_AP, dtype=np.float64)
     finished = False
-    # 가격-결합(PX): 직전 슬롯 액션의 밴드별 사용비중 (reward r_{k-1} 에 귀속).
+    # Price coupling (PX): per-band usage share of the previous slot's action
+    # (attributed to reward r_{k-1}).
     prev_usage = np.zeros((N_AP, N_LINKS), dtype=np.float32)
 
     for k in range(rollout + 1):
-        # PRE-update dual 가격 (Z·g 항과 동일 시점 규약): 밴드 k 의 이웃 가격
+        # PRE-update dual price (same timing convention as the Z*g term):
+        # neighbor price of band k
         # = sum_{j != i, k in K_j} (Z99_j + Z999_j).
         if price_beta > 0.0:
             price_pre = (z99 + z999).astype(np.float32)          # (N_AP,)
@@ -343,7 +381,8 @@ def collect_rollout_ns3(
 
         if k >= 1:
             if price_beta > 0.0:
-                # 교차항 복원: r_i -= beta * sum_k usage_{i,k} * price_k^{-i}
+                # Cross-term restoration:
+                # r_i -= beta * sum_k usage_{i,k} * price_k^{-i}
                 # (price_k^{-i} = band_price_k - masks[i,k]*price_pre[i]).
                 own = masks * price_pre[:, None]                # (N_AP, L)
                 cross = (prev_usage * (band_price[None, :] - own)).sum(axis=1)
@@ -355,8 +394,9 @@ def collect_rollout_ns3(
             v999_acc += v999
             dropped_acc += dropped
 
-        # 액션 샘플링 + 전송 (마지막 read 는 bootstrap: ns-3 를 계속 진행시키기
-        # 위해 전송은 하되 학습 데이터로 기록하지 않는다).
+        # Sample and send the action (the last read is the bootstrap: it is
+        # still sent to keep ns-3 advancing, but not recorded as training
+        # data).
         msg.PySendBegin()
         act_msg = msg.GetPy2CppStruct()
         mode_votes: List[int] = []
@@ -398,7 +438,7 @@ def collect_rollout_ns3(
                 la[np.arange(N_STA_PER_AP), links] = 1
                 last_link_active[ap] = {"link_active": la}
 
-    # GAE 정합을 위해 rewards 길이에 맞춰 truncate (early-finish 안전장치).
+    # Truncate to the rewards length for GAE alignment (early-finish guard).
     t = min(len(rewards[0]), len(states[0])) if rewards[0] else 0
     out_states = {ap: np.asarray(states[ap][:t], dtype=np.float32)
                   for ap in range(N_AP)}
@@ -413,7 +453,8 @@ def collect_rollout_ns3(
     joint_states = np.asarray(joints[:t + 1], dtype=np.float32)
 
     served_sum = float(served_acc.sum())
-    # eq:uhr 정합: 분모 decided = served + dropped, 분자 v = late + dropped.
+    # eq:uhr alignment: denominator decided = served + dropped, numerator
+    # v = late + dropped.
     decided_acc = np.maximum(served_acc + dropped_acc, 1.0)
     p99_per_ap = (v99_acc + dropped_acc) / decided_acc
     p999_per_ap = (v999_acc + dropped_acc) / decided_acc
@@ -424,21 +465,26 @@ def collect_rollout_ns3(
             (v99_acc.sum() + dropped_acc.sum()) / max(decided_acc.sum(), 1.0)),
         "p99_9_violation_rate": float(
             (v999_acc.sum() + dropped_acc.sum()) / max(decided_acc.sum(), 1.0)),
-        # per-AP 위반율 (F5 ckpt 기준 = per-AP CMDP infeasibility 용).
+        # Per-AP violation rates (basis of the F5 ckpt criterion = per-AP
+        # CMDP infeasibility).
         "p99_per_ap": p99_per_ap.copy(),
         "p99_9_per_ap": p999_per_ap.copy(),
         "mean_Z_99": float(z99.mean()),
         "mean_Z_99_9": float(z999.mean()),
-        # zq 진단: per-AP Z 의 표준편차. 0 이면 전 AP 동일(=zq 가 uniform 으로
-        # 퇴화), 클수록 제약 압력이 이질적(=zq 가중이 의미를 가짐). 99.9 쪽도
-        # 같은 진단 (eps999 가 더 엄격해 더 일찍 전-AP 포화될 수 있음).
+        # zq diagnostic: std of the per-AP Z. 0 means all APs are identical
+        # (=zq degenerates to uniform); larger means the constraint pressure is
+        # heterogeneous (=zq weighting is meaningful). Same diagnostic on the
+        # 99.9 side (eps999 is stricter, so all APs may saturate earlier).
         "std_Z_99": float(z99.std()),
         "std_Z_99_9": float(z999.std()),
-        # 포화/측정창 진단: 한 측정창(슬롯)당 AP 평균 delivered 패킷 수.
+        # Saturation / measurement-window diagnostic: mean delivered packets
+        # per AP per measurement window (slot).
         "served_per_slot": served_sum / max(N_AP * t, 1),
-        # coordination 진단: 전 AP·슬롯 샘플 중 map_mode!=0(Co-TDMA/OFDMA gating)
-        # 비율. allow_coord off 면 항상 0. on 이면 정책이 조정을 실제로 얼마나
-        # 부르는지 → coord-ON 결과 해석의 핵심(0 이면 coord-ON≡coord-OFF).
+        # Coordination diagnostic: fraction of all AP-slot samples with
+        # map_mode!=0 (Co-TDMA/OFDMA gating). Always 0 when allow_coord is off;
+        # when on, it shows how often the policy actually calls for
+        # coordination -- key to reading coord-ON results (0 means
+        # coord-ON == coord-OFF).
         "frac_coord": float(np.mean([
             (out_mm[ap] != 0).mean() if len(out_mm[ap]) else 0.0
             for ap in range(N_AP)])) if t else 0.0,
@@ -482,8 +528,9 @@ def train(args: argparse.Namespace) -> int:
     from sim.python.env.wlan_env import WLANConfig, WLANEnv  # type: ignore
     from feddrl import _link_masks  # type: ignore
 
-    # P1/P6 수정: obs 정규화 상수를 실제 설정에 연동 — Z 는 z_clip 단위,
-    # HoL 은 deadline999 단위 (구: Z/100 고정 → actor 가 Z∈[0,0.1] 만 봄).
+    # P1/P6 fix: tie the obs normalization constants to the actual settings --
+    # Z in units of z_clip, HoL in units of deadline999 (was: fixed Z/100, so
+    # the actor only ever saw Z in [0,0.1]).
     import models.networks as _networks  # type: ignore
     _networks.Z_NORM = args.z_clip
     _networks.HOL_NORM_S = args.deadline999_ms * 1e-3
@@ -514,7 +561,7 @@ def train(args: argparse.Namespace) -> int:
     shared_mode = bool(getattr(args, "shared_actor", False))
     cpo_mode = bool(getattr(args, "cpo", False))
     if shared_mode and cpo_mode:
-        raise ValueError("--shared-actor 와 --cpo 는 동시 지정 불가")
+        raise ValueError("--shared-actor and --cpo are mutually exclusive")
 
     is_local = not shared_mode
     do_agg = (args.aggregation != "none") and not shared_mode and not cpo_mode
@@ -542,11 +589,13 @@ def train(args: argparse.Namespace) -> int:
     pid_prev99 = np.zeros(N_AP, dtype=np.float64)
     pid_prev999 = np.zeros(N_AP, dtype=np.float64)
 
-    # F10 (P4 수정): per-AP value heads — joint 입력(CTDE)은 유지하되 각 AP 의
-    # GAE baseline 을 자기 AP 의 return 에 맞춘다 (구: 단일 V=cross-AP 평균이
-    # 이질 부하에서 per-AP advantage 를 편향).
-    # B (QR critic): quantiles>0 이면 head 당 K 분위수 — actor advantage 는
-    # 하위 alpha 분위 평균(CVaR) baseline (최악-경로 return 우선 개선).
+    # F10 (P4 fix): per-AP value heads -- the joint input (CTDE) is kept, but
+    # each AP's GAE baseline is fit to its own AP's return (was: a single
+    # V=cross-AP mean, which biased the per-AP advantage under heterogeneous
+    # load).
+    # B (QR critic): quantiles>0 gives K quantiles per head -- the actor
+    # advantage uses the mean of the lowest alpha quantiles (CVaR) as baseline
+    # (prioritizes improving worst-case returns).
     n_q = max(1, args.quantiles)
     critic = CriticMLP(joint_dim, n_heads=N_AP, n_quantiles=n_q).to(device)
     opt_critic = optim.Adam(critic.parameters(), lr=args.lr_critic)
@@ -554,8 +603,8 @@ def train(args: argparse.Namespace) -> int:
     print(f"[init] state_dim={state_dim} action_dim={action_dim} "
           f"joint_dim={joint_dim} n_ap={N_AP} agg={args.aggregation}")
 
-    # ns-3 를 하나의 긴 에피소드로 띄운다 (persistent env). 필요 슬롯 = 학습에
-    # 쓰는 슬롯 + bootstrap + 여유.
+    # Launch ns-3 as one long episode (persistent env). Required slots = slots
+    # used for training + bootstrap + margin.
     slot_ms = args.macro_slot_ms
     if args.episode_ms > 0:
         episode_ms = args.episode_ms
@@ -626,10 +675,12 @@ def train(args: argparse.Namespace) -> int:
 
     # Best-checkpoint tracking: persistent-env training drifts/degrades past the
     # ~iter 20-40 sweet spot, so the FINAL policy is often not the best.
-    # 선택 기준 = per-AP CMDP infeasibility (F5 수정): 네트워크 평균 p99 는
-    # 위반 AP 를 준수 AP 들이 가려 CMDP(∀i 제약)와 불일치했다. 점수는
+    # Selection criterion = per-AP CMDP infeasibility (F5 fix): the network-mean
+    # p99 let compliant APs mask violating ones and thus disagreed with the
+    # CMDP (constraint for all i). The score is
     #   mean_i [ max(0, p99_i-eps99)/eps99 + max(0, p999_i-eps999)/eps999 ]
-    # — 전 AP feasible 이면 0, 제약 위반 초과분에 비례. 논문 eq:cmdp 정합.
+    # -- 0 when every AP is feasible, proportional to the constraint excess
+    # otherwise. Consistent with eq:cmdp in the paper.
     best_score = float("inf")
     score_hist: List[float] = []
     saved_any = False
@@ -672,7 +723,8 @@ def train(args: argparse.Namespace) -> int:
             with torch.no_grad():
                 q_full = critic(joint_t).cpu().numpy()
             if n_q > 1:
-                # QR: v_mean(불편 baseline, critic 타깃용) + v_cvar(actor 용).
+                # QR: v_mean (unbiased baseline, for the critic target)
+                # + v_cvar (for the actor).
                 v_mean = q_full.mean(axis=-1)                    # (T+1, N_AP)
                 k_low = max(1, int(np.ceil(args.cvar_alpha * n_q)))
                 v_cvar = np.sort(q_full, axis=-1)[..., :k_low].mean(axis=-1)
@@ -683,10 +735,10 @@ def train(args: argparse.Namespace) -> int:
             advantages_per_ap = {}
             returns_per_ap = {}
             for ap in range(N_AP):
-                # actor advantage: CVaR baseline (n_q==1 이면 동일 경로).
+                # actor advantage: CVaR baseline (identical path when n_q==1).
                 adv, _ = compute_gae(rewards[ap], v_cvar[:, ap],
                                      args.gamma, args.gae_lambda)
-                # critic 타깃 return: 불편 mean baseline 으로 산출.
+                # critic target return: uses the unbiased mean baseline.
                 _, ret = compute_gae(rewards[ap], v_mean[:, ap],
                                      args.gamma, args.gae_lambda)
                 advantages_per_ap[ap] = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -764,10 +816,13 @@ def train(args: argparse.Namespace) -> int:
             # leaving 16 fully-independent actors (capacity-matched upper baseline).
             if do_agg and (it % args.agg_period == 0):
                 if args.aggregation == "cluster":
-                    # 이질성-인지 연합: 같은 링크집합 K_i 그룹끼리만 uniform
-                    # FedAvg. cross-K 파라미터 평균이 per-AP 특화를 파괴한다는
-                    # 진단(none>uniform>zq>iw 단조 악화)에서 도출 — 특화(K_i)는
-                    # 보존하고 같은 구조 AP 간 경험만 공유(분산 감소).
+                    # Heterogeneity-aware federation: uniform FedAvg only
+                    # within groups sharing the same link set K_i. Derived
+                    # from the diagnosis that cross-K parameter averaging
+                    # destroys per-AP specialization (monotone degradation
+                    # none>uniform>zq>iw) -- keep the specialization (K_i) and
+                    # share experience only among structurally identical APs
+                    # (variance reduction).
                     groups: Dict[tuple, List[int]] = {}
                     for a in range(N_AP):
                         groups.setdefault(
@@ -796,10 +851,12 @@ def train(args: argparse.Namespace) -> int:
                         for ap in range(N_AP):
                             for n, p in actors_local[ap].named_parameters():
                                 p.copy_(agg_params[n])
-                # F11 (P5 수정): broadcast 후 per-AP Adam 1/2차 모멘트 리셋.
-                # 평균 전 로컬 궤적의 적응 스텝을 평균된 가중치에 적용하면
-                # 이론이 분석하는 θ+ηg 로컬 업데이트가 아니며(라운드 간 옵티마
-                # 이저 메모리 누수), 연합 arm 의 bimodal 붕괴 후보 원인.
+                # F11 (P5 fix): reset the per-AP Adam 1st/2nd moments after the
+                # broadcast. Applying adaptive steps built from the local
+                # pre-average trajectory to the averaged weights is no longer
+                # the theta+eta*g local update the theory analyzes (optimizer
+                # state leaks across rounds), and is a candidate cause of the
+                # bimodal collapse of the federated arms.
                 for ap in range(N_AP):
                     opts_local[ap] = optim.Adam(
                         actors_local[ap].parameters(), lr=args.lr_actor)
@@ -832,8 +889,8 @@ def train(args: argparse.Namespace) -> int:
                     0.0, zc).astype(np.float32)
                 pid_prev99, pid_prev999 = c99, c999
 
-            # F10: critic 타깃 = per-AP returns 행렬 (T, N_AP) — head i 가
-            # AP i 의 return 을 학습 (구: cross-AP 평균 스칼라).
+            # F10: critic target = per-AP returns matrix (T, N_AP) -- head i
+            # learns AP i's return (was: a cross-AP mean scalar).
             ap_returns = np.stack(
                 [returns_per_ap[ap] for ap in range(N_AP)], axis=1)
             ap_returns_t = torch.from_numpy(ap_returns).float().to(device)
@@ -845,7 +902,8 @@ def train(args: argparse.Namespace) -> int:
                 opt_critic.zero_grad()
                 values_pred = critic(joint_t[:-1])
                 if n_q > 1:
-                    # 분위 회귀 (pinball loss): head 별 return 분포 적합.
+                    # Quantile regression (pinball loss): fit the return
+                    # distribution of each head.
                     u = ap_returns_t.unsqueeze(-1) - values_pred  # (T,N,K)
                     c_loss = torch.max(taus * u, (taus - 1.0) * u).mean()
                 else:

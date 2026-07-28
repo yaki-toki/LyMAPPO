@@ -1,14 +1,15 @@
 /*
- * feddrl_msg.h — ns-3 시나리오와 Python actor 사이의 셰어드 메모리 wire
- * format. ns3-ai 의 ``Ns3AiMsgInterfaceImpl<EnvStruct, ActStruct>`` 템플릿
- * 으로 사용되는 두 struct (Cpp2Py = Env, Py2Cpp = Act) 를 정의한다.
+ * feddrl_msg.h — shared-memory wire format between the ns-3 scenario and the
+ * Python actor. Defines the two structs (Cpp2Py = Env, Py2Cpp = Act) that are
+ * used as ns3-ai's ``Ns3AiMsgInterfaceImpl<EnvStruct, ActStruct>`` template
+ * arguments.
  *
- * 본 헤더는 C++ 시나리오(``feddrl_scenario.cc``) 와 pybind11 모듈
- * (``feddrl_py.cc``) 양쪽에서 동일하게 include 되어, struct layout 의
- * byte-level 일치를 보장한다. (ctypes 기반의 sim/ns3/bridge.py 도 동일
- * field 순서를 사용한다.)
+ * This header is included identically by the C++ scenario
+ * (``feddrl_scenario.cc``) and the pybind11 module (``feddrl_py.cc``), which
+ * guarantees byte-level agreement of the struct layout. (The ctypes-based
+ * sim/ns3/bridge.py uses the same field order.)
  *
- * 토폴로지 상수 (16-AP dense 2D OBSS): N_AP=16, N_STA_PER_AP=5, N_LINKS=3.
+ * Topology constants (16-AP dense 2D OBSS): N_AP=16, N_STA_PER_AP=5, N_LINKS=3.
  */
 
 #ifndef FEDDRL_MSG_H
@@ -24,7 +25,7 @@ constexpr uint32_t kStaPerAp = 5;
 constexpr uint32_t kNumLinks = 3;
 constexpr uint32_t kNumSta = kNumAp * kStaPerAp;
 
-// C++ -> Python: ns-3 측이 매 매크로 슬롯에 측정한 obs.
+// C++ -> Python: the obs measured by the ns-3 side on each macro slot.
 struct EnvMsg
 {
     uint32_t queueLen[kNumSta];
@@ -34,16 +35,18 @@ struct EnvMsg
     uint32_t violation99[kNumAp];
     uint32_t violation999[kNumAp];
     // per-slot MAC-queue drops (aged-out at MaxDelay=deadline999 + queue-full).
-    // eq:uhr 의 "decided = served or aged out" 분모를 per-slot 에서 성립시켜
-    // dual(Z) 신호의 survivor-bias 를 제거한다: v += dropped, d = served+dropped.
+    // Makes eq:uhr's "decided = served or aged out" denominator hold per-slot,
+    // which removes the survivor bias of the dual(Z) signal: v += dropped,
+    // d = served+dropped.
     uint32_t dropped[kNumAp];
-    // per-STA-per-link 채널 품질 [0,1] (ns-3 물리 채널이 소유·측정; Python 은
-    // 해석식 재유도 없이 이 값을 그대로 학습에 사용). 정적 large-scale fading.
+    // per-STA-per-link channel quality [0,1] (owned and measured by the ns-3
+    // physical channel; Python uses this value for learning as-is, with no
+    // analytical re-derivation). Static large-scale fading.
     float csi[kNumSta][kNumLinks];
     uint64_t nowUs;
 };
 
-// Python -> C++: 학습된 actor 의 action.
+// Python -> C++: the action of the learned actor.
 struct ActMsg
 {
     int8_t selectedLink[kNumAp][kStaPerAp];  // -1 = inactive

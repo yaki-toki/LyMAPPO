@@ -1,9 +1,9 @@
-"""v3 G2+G3: per-AP feasibility 히트맵 + arm별 시드 분포 스트립플롯.
+"""v3 G2+G3: per-AP feasibility heatmap + per-arm seed distribution strip plot.
 
-입력: results/final_l2w40 의 eval_{arm}_ts{N}_es{M}.txt / base_{arm}_es{M}.txt
+Input: eval_{arm}_ts{N}_es{M}.txt / base_{arm}_es{M}.txt in results/final_l2w40
   ([KPI_AP] a,decided=..,rx=..,lost=..,p99=..,p999=..)
-출력: docs/v3/figs/fig_feasmap.{png,pdf}, fig_seeds.{png,pdf}
-사용: python -B fig_results.py [arm1 arm2 ...]  (기본: 현재 확정 arm 목록)
+Output: docs/v3/figs/fig_feasmap.{png,pdf}, fig_seeds.{png,pdf}
+Usage: python -B fig_results.py [arm1 arm2 ...]  (default: the current settled arm list)
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def runs_of(arm):
 
 
 def seed_runs(arm):
-    """시드 단위 그룹 (표와 동일 통계단위): 학습 arm=train-seed, baseline=eval-seed."""
+    """Seed-level groups (same statistical unit as the table): learned arm=train-seed, baseline=eval-seed."""
     out = {}
     if arm in ("rr", "rssi", "slci"):
         for path in sorted(glob.glob(f"{RES}/base_{arm}_es*.txt")):
@@ -74,7 +74,7 @@ def main():
     arms = sys.argv[1:] or ["pxqr", "none", "px", "qr", "uniform", "qffl",
                             "afl", "cluster", "rr", "rssi", "slci"]
     arms = [a for a in arms if runs_of(a)]
-    # --- G2: per-AP feasibility rate 히트맵 (arm x AP) ---
+    # --- G2: per-AP feasibility rate heatmap (arm x AP) ---
     mat = np.zeros((len(arms), 16))
     for i, arm in enumerate(arms):
         rs = runs_of(arm)
@@ -88,7 +88,7 @@ def main():
     ax.set_xticklabels([f"{a}" for a in range(16)], fontsize=7)
     ax.set_yticks(range(len(arms)))
     ax.set_yticklabels([LABEL.get(a, a) for a in arms], fontsize=8.5)
-    for a in range(16):  # 링크집합 그룹 경계 표시
+    for a in range(16):  # mark the link-set group boundaries
         if a % 4 == 0 and a:
             ax.axvline(a - 0.5, color="white", lw=1.4)
     ax.set_xlabel("AP index (K tiling: {2.4,5} x2 | {5,6} | {6})",
@@ -99,8 +99,8 @@ def main():
     fig.tight_layout()
     fig.savefig(f"{OUT}/fig_feasmap.png", dpi=170, bbox_inches="tight")
     fig.savefig(f"{OUT}/fig_feasmap.pdf", bbox_inches="tight")
-    # --- G3: mean±std Pareto 뷰 (x=feasible, y=net p99 symlog) ---
-    STYLE = {  # arm: (색, 마커) — plot_pareto 관례(검정 테두리, Ours=진녹 별)
+    # --- G3: mean+/-std Pareto view (x=feasible, y=net p99 symlog) ---
+    STYLE = {  # arm: (color, marker) -- plot_pareto convention (black edge, Ours=dark green star)
         "pxqr": ("#005a32", "*"), "none": ("#41ab5d", "o"),
         "px": ("#74c476", "P"), "qr": ("#a1d99b", "h"),
         "uniform": ("#888888", "^"), "qffl": ("#e6ab02", "X"),
@@ -110,7 +110,7 @@ def main():
     fig2, ax2 = plt.subplots(figsize=(3.7, 3.1))
     for arm in arms:
         feas, p99s = [], []
-        for runs in seed_runs(arm).values():  # 시드수준 (표와 동일 단위)
+        for runs in seed_runs(arm).values():  # seed level (same unit as the table)
             feas.append(float(np.mean(
                 [sum(1 for a in range(16)
                      if r99[a] <= EPS99 and r999[a] <= EPS999)
@@ -136,7 +136,7 @@ def main():
     ax2.set_ylabel("network $p_{99}$", fontsize=9)
     ax2.tick_params(labelsize=8)
     ax2.grid(alpha=0.2)
-    # 범례: 행우선 2행(6+5) 배치 — matplotlib 은 열우선이라 인덱스 재배열
+    # Legend: row-major 2-row (6+5) layout -- matplotlib is column-major, so reorder indices
     handles, labels = ax2.get_legend_handles_labels()
     half = (len(handles) + 1) // 2
     order = []

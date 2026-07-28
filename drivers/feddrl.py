@@ -1,19 +1,20 @@
-"""feddrl.py — ns3-ai shared-memory driver for the FedDRL ns-3 scenario.
+"""feddrl.py -- ns3-ai shared-memory driver for the FedDRL ns-3 scenario.
 
-Python 측이 셰어드 메모리 creator 이고, ``ns3ai_utils.Experiment`` 가 ns-3
-시나리오 (``feddrl_scenario``) 를 자식 프로세스로 띄운다 (apb.py 와 동일
-구조). 매 매크로 슬롯마다 EnvMsg 를 수신하고 ActMsg 를 송신한다.
+The Python side is the shared-memory creator, and ``ns3ai_utils.Experiment``
+launches the ns-3 scenario (``feddrl_scenario``) as a child process (same
+structure as apb.py). Every macro slot it receives an EnvMsg and sends an
+ActMsg.
 
 Policy modes:
-- ``--ckpt`` 미지정 → stub policy (모든 STA 가 link 0, mapMode=0).
-- ``--ckpt <path>`` → 학습된 actor checkpoint 로드. ns-3 측 EnvMsg 에서
-  available 한 필드 (queueLen, holUs, cbr, served) 를 Python sim 의 obs
-  schema (csi/queue/hol_age/cbr/Z_99/Z_99_9) 로 best-effort 매핑한 뒤
-  actor MLP 로 link/mapMode 를 샘플링한다. CSI 와 Z 큐는 ns-3 측에 부재
-  하므로 placeholder 값을 사용 — sim2sim gap 의 일부는 이 obs 스키마 차이
-  에서 비롯된다 (cross-validation 보고용).
+- ``--ckpt`` omitted -> stub policy (all STAs on link 0, mapMode=0).
+- ``--ckpt <path>`` -> load a trained actor checkpoint. The fields available in
+  the ns-3 EnvMsg (queueLen, holUs, cbr, served) are best-effort mapped to the
+  obs schema of the Python sim (csi/queue/hol_age/cbr/Z_99/Z_99_9), then the
+  actor MLP samples link/mapMode. CSI and the Z queues are absent on the ns-3
+  side, so placeholder values are used -- part of the sim2sim gap originates
+  from this obs schema difference (for the cross-validation report).
 
-실행 (WSL Ubuntu 안에서):
+Running (inside WSL Ubuntu):
     cd ~/ns-3-dev/contrib/ai/examples/feddrl
     python3 feddrl.py --seed 0 --arrival-pps 5500              # stub
     python3 feddrl.py --seed 0 --ckpt $REPO_ROOT/models/checkpoints/feddrl_arr5500_v10.pt
@@ -36,15 +37,16 @@ _LINK_MASKS_CACHE: Optional[np.ndarray] = None
 
 # per-AP running dual variables, reconstructed from ns-3 per-slot counts with
 # THE SAME rule as training (train_ns3.py._ns3_obs_and_reward): rate-form
-# g = (v+drop)/decided - eps, Z <- clip(Z+g, 0, Z_CLIP). (구: count형·무클립·
-# /N_STA 재구성은 학습과 다른 동역학/스케일 = OOD Z 입력이었다 — P3 수정.)
-# Fresh process per episode -> 0 init. 상수는 CLI 로 덮어씀 (main).
+# g = (v+drop)/decided - eps, Z <- clip(Z+g, 0, Z_CLIP). (Old: the count-form,
+# unclipped, /N_STA reconstruction had different dynamics/scale from training
+# = an OOD Z input -- P3 fix.)
+# Fresh process per episode -> 0 init. Constants overwritten via CLI (main).
 _Z99_RUNNING = np.zeros(N_AP, dtype=np.float32)
 _Z999_RUNNING = np.zeros(N_AP, dtype=np.float32)
 EPS_99 = 1e-2
 EPS_999 = 1e-3
 Z_CLIP = 10.0
-NO_LYAP = False  # no-Z ablation ckpt 평가 시 True (main 에서 설정)
+NO_LYAP = False  # True when evaluating a no-Z ablation ckpt (set in main)
 
 # ── r3 #1 per-slot metric diagnostic ────────────────────────────────────────
 # Remark 1 reviewer check: compare the eq.(1) per-slot-RATE metric
@@ -150,11 +152,11 @@ def _link_masks() -> np.ndarray:
 def _load_actors(
     ckpt_path: str, repo_root: str, device: str
 ) -> tuple[List[Any], Any]:
-    """Repo 의 train_feddrl 체크포인트를 로드하여 (actors, sample_action) 반환.
+    """Load the repo's train_feddrl checkpoint and return (actors, sample_action).
 
-    체크포인트가 ``actors`` (local mode) 또는 ``actor`` (shared mode) 키를
-    가지는지 자동 감지. shared mode 인 경우 N_AP 개의 actor 모두 동일 weight 를
-    공유한다.
+    Auto-detects whether the checkpoint has an ``actors`` (local mode) or an
+    ``actor`` (shared mode) key. In shared mode all N_AP actors share the same
+    weights.
     """
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -168,7 +170,7 @@ def _load_actors(
     )
     from sim.python.env.wlan_env import WLANConfig, WLANEnv  # type: ignore
 
-    # Actor MLP 의 input/output dim 은 env config 에서 결정된다.
+    # The input/output dim of the actor MLP is determined by the env config.
     cfg = WLANConfig(seed=0, horizon=1, n_ap=N_AP,
                      n_sta_per_ap=N_STA_PER_AP, n_links=N_LINKS)
     env = WLANEnv(cfg)
@@ -195,10 +197,10 @@ def _load_actors(
 
 
 def _ns3_obs_to_python(env_msg: Any) -> List[dict]:
-    """C++ EnvMsg 를 Python actor 가 기대하는 per-AP obs dict 리스트로 변환.
+    """Convert the C++ EnvMsg to the per-AP obs dict list expected by the actor.
 
-    ns-3 측 EnvMsg 는 queueLen, holUs, cbr, served 만 갖고 있고 csi / Z 큐 는
-    부재하므로 placeholder (csi=0.5, Z=0) 로 채운다.
+    The ns-3 EnvMsg only carries queueLen, holUs, cbr, served; csi and the Z
+    queues are absent, so they are filled with placeholders (csi=0.5, Z=0).
     """
     queue_len = np.frombuffer(env_msg.queueLen(), dtype=np.uint32).reshape(
         N_AP, N_STA_PER_AP)
@@ -206,14 +208,16 @@ def _ns3_obs_to_python(env_msg: Any) -> List[dict]:
         N_AP, N_STA_PER_AP)
     cbr_raw = np.frombuffer(env_msg.cbr(), dtype=np.uint8).reshape(
         N_AP, N_LINKS).astype(np.float32) / 255.0
-    # CSI: ns-3 물리 채널이 소유·측정한 값을 obs 로 받는다 (해석식 재유도 없음).
+    # CSI: taken as obs from the value the ns-3 physical channel owns and
+    # measures (no analytic re-derivation).
     csi_all = np.frombuffer(env_msg.csi(), dtype=np.float32).reshape(
         N_AP, N_STA_PER_AP, N_LINKS)
 
     masks = _link_masks()
-    # Dual variable Z: 학습(train_ns3.py._ns3_obs_and_reward)과 동일 규칙 —
-    # rate 형 g = (v+drop)/decided - eps, Z <- clip(Z+g, 0, Z_CLIP).
-    # decided = served + dropped (eq:uhr 의 aged-out 포함, survivor-bias 제거).
+    # Dual variable Z: same rule as training (train_ns3.py._ns3_obs_and_reward)
+    # -- rate form g = (v+drop)/decided - eps, Z <- clip(Z+g, 0, Z_CLIP).
+    # decided = served + dropped (includes the eq:uhr aged-out, removes
+    # survivor bias).
     viol99 = np.frombuffer(env_msg.violation99(), dtype=np.uint32).astype(np.float32)
     viol999 = np.frombuffer(env_msg.violation999(), dtype=np.uint32).astype(np.float32)
     served = np.frombuffer(env_msg.served(), dtype=np.uint32).astype(np.float32)
@@ -221,7 +225,7 @@ def _ns3_obs_to_python(env_msg: Any) -> List[dict]:
     decided = np.maximum(served + dropped, 1.0)
     g99 = (viol99 + dropped) / decided - EPS_99
     g999 = (viol999 + dropped) / decided - EPS_999
-    if not NO_LYAP:  # no-Z ablation ckpt 는 Z 특징 0 고정 (학습과 동일)
+    if not NO_LYAP:  # a no-Z ablation ckpt keeps Z features at 0 (as in training)
         for a in range(N_AP):
             _Z99_RUNNING[a] = min(
                 Z_CLIP, max(0.0, float(_Z99_RUNNING[a] + g99[a])))
@@ -229,15 +233,15 @@ def _ns3_obs_to_python(env_msg: Any) -> List[dict]:
                 Z_CLIP, max(0.0, float(_Z999_RUNNING[a] + g999[a])))
     out: List[dict] = []
     for ap in range(N_AP):
-        # queue (n_sta, n_links, 4): backlog by AC. ns-3 측 single-AC 가정.
+        # queue (n_sta, n_links, 4): backlog by AC. ns-3 side assumes single AC.
         queue = np.zeros((N_STA_PER_AP, N_LINKS, 4), dtype=np.float32)
         queue[:, 0, 0] = queue_len[ap].astype(np.float32)
         # hol_age (n_sta, n_links): μs -> seconds.
         hol_age = np.zeros((N_STA_PER_AP, N_LINKS), dtype=np.float32)
         hol_age[:, 0] = hol_us[ap].astype(np.float32) * 1e-6
-        # per-STA-per-link CSI (ns-3 물리 채널이 측정·전달한 값).
+        # per-STA-per-link CSI (value measured and delivered by the ns-3 channel).
         csi = csi_all[ap]
-        # Z: per-AP running dual variable, broadcast to the AP 의 STA 들.
+        # Z: per-AP running dual variable, broadcast to the STAs of the AP.
         z99 = np.full((N_STA_PER_AP,), _Z99_RUNNING[ap], dtype=np.float32)
         z999 = np.full((N_STA_PER_AP,), _Z999_RUNNING[ap], dtype=np.float32)
         out.append({
@@ -247,7 +251,7 @@ def _ns3_obs_to_python(env_msg: Any) -> List[dict]:
             "cbr": cbr_raw[ap],
             "Z_99": z99,
             "Z_99_9": z999,
-            "link_mask": masks[ap],  # P7: AP 의 링크 집합 K_i (encode_obs 정합)
+            "link_mask": masks[ap],  # P7: link set K_i of the AP (encode_obs match)
         })
     return out
 
@@ -260,11 +264,12 @@ def _stub_policy(act_msg: Any) -> None:
 
 
 def _rssi_policy(env_msg: Any, act_msg: Any) -> None:
-    """RSSI-MLO 고정정책: STA 마다 available 링크 중 CSI 최고를 선택, mode none.
+    """Fixed RSSI-MLO policy: per-STA best-CSI available link, mode none.
 
-    surrogate 의 _override_action_rssi_link (link=argmax csi) 와 대응 — 보정
-    Stage 2 에서 학습을 배제하고 두 시뮬레이터의 순수 동역학을 비교하기 위한
-    공통 baseline. CSI 는 ns-3 가 측정·전달한 obs 값을 그대로 사용.
+    Corresponds to _override_action_rssi_link (link=argmax csi) of the surrogate
+    -- the common baseline used in calibration Stage 2 to exclude learning and
+    compare the pure dynamics of the two simulators. CSI uses the obs value
+    measured and delivered by ns-3 as is.
     """
     masks = _link_masks()
     csi_all = np.frombuffer(env_msg.csi(), dtype=np.float32).reshape(
@@ -278,10 +283,11 @@ def _rssi_policy(env_msg: Any, act_msg: Any) -> None:
 
 
 def _slci_policy(env_msg: Any, act_msg: Any) -> None:
-    """SLCI (Lopez-Raventos & Bellalta, IEEE WCL 11(7), 2022): 각 BSS 의 STA
-    들을 허용 링크 K_i 중 최소 혼잡(CBR) 링크로 — published least-congested-
-    interface 휴리스틱. ICC'23 MH-RSAC 가 이 baseline 대비 수치를 공표했으므로
-    사슬 비교 앵커가 된다. CBR 은 ns-3 가 측정·전달한 obs 값."""
+    """SLCI (Lopez-Raventos & Bellalta, IEEE WCL 11(7), 2022): put the STAs of
+    each BSS on the least-congested (CBR) link among the allowed set K_i -- the
+    published least-congested-interface heuristic. ICC'23 MH-RSAC published
+    numbers against this baseline, so it anchors the chain comparison. CBR is
+    the obs value measured and delivered by ns-3."""
     masks = _link_masks()
     cbr = np.frombuffer(env_msg.cbr(), dtype=np.uint8).reshape(
         N_AP, N_LINKS).astype(np.float32)
@@ -323,9 +329,10 @@ def _actor_policy(
             logits = actors[ap](
                 torch.from_numpy(feat).to(device).unsqueeze(0)
             ).squeeze(0)
-        # P3 수정: 학습과 동일 지점·동일 구현으로 logit 마스킹 — 없으면 평가
-        # 정책이 비허용 링크/동결 모드를 argmax 로 선택할 수 있다 (train/eval
-        # 행동분포 불일치).
+        # P3 fix: logit masking at the same point and with the same
+        # implementation as training -- without it the evaluation policy can
+        # argmax into a disallowed link / frozen mode (train/eval action
+        # distribution mismatch).
         logits = mask_link_logits(logits, masks[ap], N_STA_PER_AP, N_LINKS)
         if no_coord:
             logits = mask_map_logits(logits, N_STA_PER_AP, N_LINKS, N_MAP_MODES)
@@ -338,7 +345,8 @@ def _actor_policy(
         map_modes.append(int(indices["map_mode"]))
     if _OBS_DUMP_ON:
         _OBS_LIST.append(np.stack(feats_all, axis=0))  # (N_AP, state_dim)
-    # AP 별 map_mode 가 다를 수 있지만 ActMsg 는 단일 mapMode 만 지원 → 다수결.
+    # map_mode can differ per AP but ActMsg carries a single mapMode ->
+    # majority vote.
     act_msg.mapMode = int(np.bincount(map_modes, minlength=3).argmax())
     if os.environ.get("FEDDRL_DEBUG"):
         qsum = int(np.frombuffer(env_msg.queueLen(), dtype=np.uint32).sum())
@@ -553,7 +561,7 @@ def main() -> int:
         type=str,
         default=None,
         help=(
-            "학습된 actor checkpoint (.pt). 미지정 시 stub policy 사용."
+            "Trained actor checkpoint (.pt). If omitted, the stub policy is used."
         ),
     )
     parser.add_argument(
@@ -573,10 +581,10 @@ def main() -> int:
         type=str,
         default="auto",
         choices=["auto", "rssi", "stub", "slci"],
-        help="auto=ckpt actor(있으면)/stub, rssi=RSSI-MLO 고정정책(보정용), "
-             "slci=published least-congested-interface 휴리스틱 "
-             "(Lopez-Raventos & Bellalta, IEEE WCL 2022): 허용 링크 중 "
-             "최소 CBR 링크 선택.",
+        help="auto=ckpt actor (if present)/stub, rssi=fixed RSSI-MLO policy "
+             "(for calibration), slci=published least-congested-interface "
+             "heuristic (Lopez-Raventos & Bellalta, IEEE WCL 2022): pick the "
+             "minimum-CBR link among the allowed links.",
     )
     parser.add_argument(
         "--no-coord",
@@ -593,38 +601,44 @@ def main() -> int:
     )
     parser.add_argument(
         "--chan-dwell-ms", type=float, default=200.0,
-        help="F6 Markov 채널 평균 상태 체류(ms). 0 = 정적 채널(레거시).",
+        help="F6 Markov channel mean state dwell (ms). 0 = static channel "
+             "(legacy).",
     )
     parser.add_argument(
         "--het-bands", type=int, default=1,
-        help="F7 이질 밴드(2.4/5/6GHz, 폭 20/40/80MHz). 0 = 레거시 동일 채널.",
+        help="F7 heterogeneous bands (2.4/5/6GHz, widths 20/40/80MHz). "
+             "0 = legacy identical channel.",
     )
     parser.add_argument(
         "--link2-width", type=int, default=80,
-        help="link2(6GHz) 채널폭 MHz: 80(기본) 또는 40 (churn 재시도폭풍 완화).",
+        help="link2 (6GHz) channel width in MHz: 80 (default) or 40 (mitigates "
+             "the churn retry storm).",
     )
     parser.add_argument(
         "--drain-target", type=int, default=8,
-        help="F8 공유버퍼 drain-on-demand 의 per-link MAC 큐 목표 깊이. "
-             "0 = direct-send 레거시(A/B).",
+        help="F8 target per-link MAC queue depth for the shared-buffer "
+             "drain-on-demand. 0 = direct-send legacy (A/B).",
     )
     parser.add_argument(
         "--z-clip", type=float, default=10.0,
-        help="dual 변수 Z 상한 — 학습(train_ns3.py --z-clip)과 반드시 일치. "
-             "eval 의 Z 재구성이 학습과 동일 규칙/스케일이어야 OOD 입력이 없다.",
+        help="Upper bound of the dual variable Z -- MUST match training "
+             "(train_ns3.py --z-clip). The eval Z reconstruction needs the same "
+             "rule/scale as training to avoid OOD inputs.",
     )
     parser.add_argument(
         "--eps99", type=float, default=1e-2,
-        help="99% 위반율 목표 — 학습과 일치 필수 (Z 재구성에 사용).",
+        help="99% violation-rate target -- must match training (used in the Z "
+             "reconstruction).",
     )
     parser.add_argument(
         "--eps999", type=float, default=1e-3,
-        help="99.9% 위반율 목표 — 학습과 일치 필수 (Z 재구성에 사용).",
+        help="99.9% violation-rate target -- must match training (used in the Z "
+             "reconstruction).",
     )
     parser.add_argument(
         "--no-lyapunov", action="store_true",
-        help="no-Z ablation ckpt 평가용: obs 의 Z 특징을 학습과 동일하게 0 "
-             "고정 (Z 재구성 생략).",
+        help="For evaluating a no-Z ablation ckpt: keep the Z features of obs "
+             "fixed at 0 as in training (skips the Z reconstruction).",
     )
     parser.add_argument(
         "--metric-log", action="store_true",
@@ -639,13 +653,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--hol-norm-ms", type=float, default=None,
-        help="obs 의 HoL 정규화 기준(ms). 기본 None = deadline999 사용. 평가 "
-             "deadline 을 학습과 다르게 잡을 때(예: deadline 재캘리브 20/40ms "
-             "평가) 학습 당시 값(20)을 지정해 obs 분포 이동을 막는다.",
+        help="HoL normalization reference for obs (ms). Default None = use "
+             "deadline999. When the eval deadline is set differently from "
+             "training (e.g. the 20/40ms deadline recalibration eval), pass the "
+             "training-time value (20) to prevent an obs distribution shift.",
     )
     args = parser.parse_args()
 
-    # eval 의 Z 재구성 상수를 학습 설정과 정렬 (모듈 전역 — _ns3_obs_to_python).
+    # Align the eval Z-reconstruction constants with the training setup
+    # (module globals -- _ns3_obs_to_python).
     global EPS_99, EPS_999, Z_CLIP, NO_LYAP, _METRIC_ON, _METRIC_ACC, _OBS_DUMP_ON
     EPS_99 = args.eps99
     EPS_999 = args.eps999
@@ -662,9 +678,11 @@ def main() -> int:
     if args.repo_root not in sys.path:
         sys.path.insert(0, args.repo_root)
 
-    # P1/P6 수정: obs 정규화 상수를 실제 설정에 연동 — 학습과 동일해야
-    # encode_obs 입력 분포가 일치한다 (구: Z/100 고정 = actor 가 Z 를 못 봄).
-    # --hol-norm-ms 가 주어지면 KPI deadline 과 obs 정규화를 분리(재캘리브 평가).
+    # P1/P6 fix: tie the obs normalization constants to the actual setup -- they
+    # must equal training for the encode_obs input distribution to match (old:
+    # a fixed Z/100 meant the actor could not see Z).
+    # If --hol-norm-ms is given, the KPI deadline and the obs normalization are
+    # decoupled (recalibration eval).
     import models.networks as _networks  # type: ignore
     _networks.Z_NORM = args.z_clip
     _networks.HOL_NORM_S = (

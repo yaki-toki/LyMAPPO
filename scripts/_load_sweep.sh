@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export NS3_ROOT="${NS3_ROOT:-$HOME/ns-3-dev}"
-# Option-2 strengthening (user: "강화 옵션 1,2,3 순차"): load sweep lambda in
-# {40,80} pps/STA (60 = existing final_l2w40 operating point). pxqr trainings
-# s0-7 per load + evals es{10,12,18}; baselines rr/rssi/slci eval-only.
+# Option-2 strengthening (user: "strengthening options 1,2,3 in sequence"): load
+# sweep lambda in {40,80} pps/STA (60 = existing final_l2w40 operating point).
+# pxqr trainings s0-7 per load + evals es{10,12,18}; baselines rr/rssi/slci
+# eval-only.
 # Protocol otherwise identical to _seed_ext.sh (deadlines 20/40ms fixed).
 set -u
 export PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1

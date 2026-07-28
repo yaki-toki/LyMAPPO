@@ -1,6 +1,6 @@
-"""FL 비교군 aggregator (q-FFL / AFL) 단위 테스트 — R2 대응.
+"""Unit tests for the FL comparison aggregators (q-FFL / AFL) -- response to R2.
 
-pytest 미설치 환경 대비 standalone runner 포함:
+Includes a standalone runner for environments without pytest installed:
     PYTHONDONTWRITEBYTECODE=1 python -B tests/test_fl_baselines.py
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ def test_qffl_upweights_high_cost_ap() -> None:
     assert abs(w.sum() - 1.0) < 1e-6
     assert w[2] == w.max()
     assert w[2] > 0.3, w
-    assert w.min() > 0.0, "q-FFL 은 클라이언트를 0 으로 만들지 않는다"
+    assert w.min() > 0.0, "q-FFL never drives a client to 0"
 
 
 def test_qffl_equal_costs_uniform() -> None:
@@ -42,7 +42,7 @@ def test_afl_concentrates_on_worst_client() -> None:
     agg = AFLAggregator(N_AP)
     cost = np.array([0.0, 0.0, 4.0, 0.0], dtype=np.float32)
     w = None
-    for _ in range(8):  # mirror ascent 반복 -> worst client 로 질량 집중
+    for _ in range(8):  # mirror ascent iterations -> mass concentrates on the worst client
         w = agg.compute_weights(cost)
     assert abs(w.sum() - 1.0) < 1e-6
     assert w[2] == w.max()
@@ -52,11 +52,11 @@ def test_afl_concentrates_on_worst_client() -> None:
 def test_afl_state_persists_and_uniform_start() -> None:
     agg = AFLAggregator(N_AP)
     w0 = agg.compute_weights(np.zeros(N_AP, dtype=np.float32))
-    assert np.allclose(w0, 0.25), w0  # 균등 cost -> lambda 불변 (uniform)
+    assert np.allclose(w0, 0.25), w0  # uniform cost -> lambda unchanged (uniform)
     cost = np.array([0.0, 3.0, 0.0, 0.0], dtype=np.float32)
     w1 = agg.compute_weights(cost)
     w2 = agg.compute_weights(cost)
-    assert w2[1] > w1[1] > 0.25, (w1, w2)  # 상태 누적 확인
+    assert w2[1] > w1[1] > 0.25, (w1, w2)  # confirms state accumulation
 
 
 def test_agg_measure_cost_modes() -> None:
@@ -71,7 +71,7 @@ def test_agg_measure_cost_modes() -> None:
     except ValueError:
         pass
     else:
-        raise AssertionError("cost 없는 qffl 은 ValueError 여야 함")
+        raise AssertionError("qffl without cost must raise ValueError")
 
 
 def test_make_aggregator_fl_modes() -> None:

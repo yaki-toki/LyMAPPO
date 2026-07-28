@@ -1,9 +1,10 @@
-"""v3 G1: 시뮬레이션 토폴로지 다이어그램 (구현 상수와 1:1).
+"""v3 G1: simulation topology diagram (1:1 with the implementation constants).
 
-feddrl_scenario.cc 확정값: 16 AP 4x4 격자 pitch 8 m, AP 당 5 STA 반경 3 m 링,
-K_i = (i%4) 타일 {0,1},{0,1},{1,2},{2}; 밴드 link0=2.4G/20M, link1=5G/40M,
-link2=6G/40M; zero-sum load-spread 0.6 (AP0 x1.6 → AP15 x0.4).
-출력: docs/v3/figs/fig_topology.{png,pdf}
+Settled values of feddrl_scenario.cc: 16 APs on a 4x4 grid of pitch 8 m, 5 STAs
+per AP on a radius 3 m ring, K_i = (i%4) tiling {0,1},{0,1},{1,2},{2}; bands
+link0=2.4G/20M, link1=5G/40M, link2=6G/40M; zero-sum load-spread 0.6
+(AP0 x1.6 -> AP15 x0.4).
+Output: docs/v3/figs/fig_topology.{png,pdf}
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from matplotlib.patches import Circle
 PITCH = 8.0
 RING = 3.0
 N_AP, PER, COLS = 16, 5, 4
-# K_i 그룹 (열 = i%4): 색은 plot_pareto 팔레트 관례 근처의 구분색.
+# K_i groups (column = i%4): colors are distinct shades near the plot_pareto palette convention.
 GROUPS = {
     (1, 1, 0): ("#1f6fb4", r"$\mathcal{K}=\{2.4,5\}$ GHz"),
     (0, 1, 1): ("#2c8b57", r"$\mathcal{K}=\{5,6\}$ GHz"),
@@ -31,22 +32,23 @@ SETS = [(1, 1, 0), (1, 1, 0), (0, 1, 1), (0, 0, 1)]
 def main() -> None:
     plt.rcParams.update({"font.size": 8.5})
     fig, ax = plt.subplots(figsize=(3.9, 4.3))
-    # OBSS 도메인 오버레이: 같은 밴드를 쓰는 BSS 는 전부 하나의 CSMA 충돌
-    # 도메인 (전 AP 상호 CS 범위). 밴드-공유 그래프 = OBSS 구조.
-    #   2.4GHz: 열 0-1 (8 BSS) / 5GHz: 열 0-2 (12 BSS) / 6GHz: 열 2-3 (8 BSS)
+    # OBSS domain overlay: all BSSs on the same band form a single CSMA collision
+    # domain (all APs are in mutual CS range). Band-sharing graph = OBSS structure.
+    #   2.4GHz: cols 0-1 (8 BSSs) / 5GHz: cols 0-2 (12 BSSs) / 6GHz: cols 2-3 (8 BSSs)
     from matplotlib.patches import FancyBboxPatch
-    bands = [  # (x0열, x1열, y-offset, 색, 라벨)
+    bands = [  # (x0 col, x1 col, y-offset, color, label)
         (0, 1, 5.0, "#1f6fb4", "2.4 GHz (8 BSSs)"),
         (0, 2, 7.2, "#8a5fbf", "5 GHz OBSS (12 BSSs)"),
         (2, 3, 5.0, "#bb3754", "6 GHz (8 BSSs)"),
     ]
-    # AP coverage(캐리어센스) 기반 OBSS: 모델 CS 반경 ~51 m (TxPower 16 dBm,
-    # log-distance n=3, preamble 검출 -82 dBm) >> 배치 대각 ~34 m → 어느 AP 의
-    # CS 원이든 전 배치를 덮는다 = 16 BSS 완전 중첩 OBSS. 대표로 AP5 의 원과
-    # 최원거리 AP15 까지의 화살표를 표시 (16개 전부 그리면 완전히 겹침).
+    # OBSS from AP coverage (carrier sense): the model CS radius ~51 m (TxPower
+    # 16 dBm, log-distance n=3, preamble detection -82 dBm) >> the ~34 m deployment
+    # diagonal, so the CS circle of any AP covers the whole deployment = a fully
+    # overlapping 16-BSS OBSS. As a representative, the circle of AP5 and an arrow
+    # to the farthest AP15 are drawn (drawing all 16 would overlap completely).
     CS_R = 51.0
     cx, cy = 1 * PITCH, 1 * PITCH  # AP5
-    # 실척 인셋: CS 원(반경 ~51 m) 안에 4x4 격자 전체가 들어감을 증명.
+    # To-scale inset: proves the entire 4x4 grid fits inside the CS circle (radius ~51 m).
     axin = ax.inset_axes([0.02, 0.02, 0.20, 0.20])
     axin.add_patch(Circle((cx, cy), CS_R, fill=True, fc="#f2c94c",
                           alpha=0.28, ec="#c9962a", ls="-.", lw=1.2))
@@ -75,7 +77,7 @@ def main() -> None:
         key = SETS[a % 4]
         color, _ = GROUPS[key]
         mult = 1.0 + 0.6 * (1.0 - 2.0 * a / (N_AP - 1))  # zero-sum spread
-        # STA 링
+        # STA ring
         ax.add_patch(Circle((x, y), RING, fill=False, ls=":", lw=0.6,
                             ec=color, alpha=0.55))
         for k in range(PER):
@@ -87,12 +89,12 @@ def main() -> None:
         ax.plot(x, y, marker="^", ms=10, c=color, mec="black", mew=0.7)
         ax.annotate(f"AP{a}", (x, y), xytext=(0, 9),
                     textcoords="offset points", ha="center", fontsize=8)
-        if a in (0, N_AP - 1):  # 부하 배수는 끝점만 (스프레드는 하단 표기)
-            mxy = (26, -4)  # 두 끝점 모두 우측 표기 (인셋·화살표 회피)
+        if a in (0, N_AP - 1):  # load multiplier only at the endpoints (spread labelled below)
+            mxy = (26, -4)  # both endpoints labelled on the right (avoids inset/arrow)
             ax.annotate(f"{mult:.1f}x", (x, y), xytext=mxy,
                         textcoords="offset points", ha="center",
                         fontsize=7.5, color="#444444")
-    # 부하 gradient 화살표
+    # load gradient arrow
     ax.annotate("", xy=(3 * PITCH + 3.5, 3 * PITCH), xytext=(-3.5, 0),
                 arrowprops=dict(arrowstyle="->", color="#888888", lw=0.9,
                                 ls="--"))

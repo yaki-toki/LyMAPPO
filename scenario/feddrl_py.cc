@@ -30,8 +30,8 @@ PYBIND11_MODULE(ns3ai_feddrl_py, m)
     m.attr("N_STA") = py::int_(kNumSta);
 
     // EnvMsg: C++ -> Python observation.
-    // 배열 필드는 raw memoryview 로 노출 (pybind11 가 fixed-size C 배열을
-    // numpy buffer 로 자동 변환하지 못하므로 lambda accessor 사용).
+    // Array fields are exposed as raw memoryviews (pybind11 cannot auto-convert
+    // fixed-size C arrays into numpy buffers, hence the lambda accessors).
     py::class_<EnvMsg>(m, "PyEnvMsg")
         .def(py::init<>())
         .def_readwrite("nowUs", &EnvMsg::nowUs)

@@ -1,12 +1,12 @@
-"""IEEE 802.11 EDCA - 4 액세스 카테고리 (VO, VI, BE, BK).
+"""IEEE 802.11 EDCA - 4 access categories (VO, VI, BE, BK).
 
-각 (STA, link) 쌍이 4 개의 AC 큐를 보유한다. EDCA 파라미터 (CWmin, CWmax,
-AIFSN, TXOP) 는 formulation 의 식 (2) action 변수로 노출된다. 기본값은
-IEEE 802.11-2020 표준 EDCA 파라미터.
+Every (STA, link) pair holds 4 AC queues. The EDCA parameters (CWmin, CWmax,
+AIFSN, TXOP) are exposed as the eq. (2) action variables of the formulation.
+The defaults are the IEEE 802.11-2020 standard EDCA parameters.
 
-이 모듈은 Bianchi-style 근사 contention 모델을 제공한다: 각 슬롯에서 AC
-별로 transmission 시도 확률 tau = 2 / (cw + 1) 로 송신 시도, 충돌 발생 시
-CW 를 두 배로 증가 (cwmax 에서 saturate), 성공 시 cwmin 으로 reset.
+This module provides an approximate Bianchi-style contention model: in each slot
+a transmission is attempted per AC with probability tau = 2 / (cw + 1); on a
+collision CW is doubled (saturating at cwmax) and on success it is reset to cwmin.
 """
 from __future__ import annotations
 
@@ -102,30 +102,31 @@ class EDCAQueue:
         self.cw = self.cwmin.copy()
         self.backoff.fill(0)
 
-    # --------- Bianchi-style contention 모델 ---------
+    # --------- Bianchi-style contention model ---------
 
     def bianchi_tx_prob(self, ac: int) -> float:
-        """슬롯 당 송신 시도 확률 tau = 2 / (cw + 1) (Bianchi 1998 모델).
+        """Per-slot transmission attempt probability tau = 2 / (cw + 1) (Bianchi 1998).
 
-        AC 별로 별도 backoff 상태 보유. 큐가 비어 있으면 0 반환.
+        A separate backoff state is held per AC. Returns 0 if the queue is empty.
         """
         if not self.queues[ac]:
             return 0.0
         return 2.0 / float(self.cw[ac] + 1)
 
     def tx_prob(self, ac: int) -> float:
-        """공유-버퍼 (MLD 상위-MAC) 모델용 tau — 자체 큐 비어있음 게이트 없음.
+        """tau for the shared-buffer (MLD upper-MAC) model -- no own-queue-empty gate.
 
-        P1 이후 데이터는 per-STA 공유 버퍼에 있고 이 객체는 per-(STA,link)
-        contention 상태만 보유하므로, 버퍼 비어있음 확인은 호출자 몫이다.
+        Since P1, the data lives in the per-STA shared buffer and this object holds
+        only per-(STA,link) contention state, so checking for an empty buffer is the
+        caller's responsibility.
         """
         return 2.0 / float(self.cw[ac] + 1)
 
     def on_success(self, ac: int) -> None:
-        """송신 성공 → CW 를 cwmin 으로 reset."""
+        """Successful transmission -> reset CW to cwmin."""
         self.cw[ac] = self.cwmin[ac]
 
     def on_collision(self, ac: int) -> None:
-        """충돌 발생 → CW 를 두 배 (cwmax 에서 saturate)."""
+        """Collision -> double CW (saturating at cwmax)."""
         new_cw = min(2 * int(self.cw[ac]), int(self.cwmax[ac]))
         self.cw[ac] = np.int32(new_cw)

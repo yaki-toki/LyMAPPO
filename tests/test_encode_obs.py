@@ -1,4 +1,4 @@
-"""P6 (obs 정규화) 단위 테스트 — encode_obs 가 큰 큐/HOL/Z 를 압축하는지.
+"""P6 (obs normalization) unit tests -- does encode_obs compress large queue/HOL/Z.
 
     PYTHONDONTWRITEBYTECODE=1 python -B tests/test_encode_obs.py
 """
@@ -37,16 +37,16 @@ def test_dim_includes_link_mask() -> None:
 
 
 def test_large_values_compressed() -> None:
-    """binding/persist 에서 나오는 극단값 (큐 5000, HOL 180ms, Z 100)."""
+    """Extreme values arising in binding/persist (queue 5000, HOL 180ms, Z 100)."""
     vec = encode_obs(_obs(5000.0, 0.18, 100.0))
     assert float(np.abs(vec).max()) < 50.0, float(np.abs(vec).max())
 
 
 def test_zero_obs_zero_features_except_mask() -> None:
     vec = encode_obs(_obs(0.0, 0.0, 0.0))
-    # csi (앞 15개) 와 link_mask fallback (뒤 3개=1) 제외 전부 0.
+    # All zero except csi (first 15) and the link_mask fallback (last 3 = 1).
     assert np.allclose(vec[N_STA * N_LINKS:-N_LINKS], 0.0)
-    assert np.allclose(vec[-N_LINKS:], 1.0)  # mask 없으면 대칭 (전부 1)
+    assert np.allclose(vec[-N_LINKS:], 1.0)  # without a mask it is symmetric (all 1)
 
 
 def test_link_mask_passthrough() -> None:

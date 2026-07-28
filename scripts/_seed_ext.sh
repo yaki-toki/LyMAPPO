@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 export REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export NS3_ROOT="${NS3_ROOT:-$HOME/ns-3-dev}"
-# Option-1 strengthening (user: "강화 옵션 1,2,3 순차 진행"): seed extension
-# s8-15 for pxqr(full) + none(base) -> n=16 per arm, component significance
-# retest. Settled protocol identical to _ab_arms.sh. Evals at es{10,12,18}.
+# Option-1 strengthening (user: "proceed with strengthening options 1,2,3 in
+# sequence"): seed extension s8-15 for pxqr(full) + none(base) -> n=16 per arm,
+# component significance retest. Settled protocol identical to _ab_arms.sh.
+# Evals at es{10,12,18}.
 set -u
 export PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 EX=$NS3_ROOT/contrib/ai/examples/feddrl

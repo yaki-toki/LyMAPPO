@@ -8,7 +8,7 @@ diagnosed link-concentration blind spot, WITHOUT disturbing v1 physics:
     rises monotonically with load) -- the coupling ns-3 has and v1 lacked;
   - the eq:uhr decided-denominator violation accounting is preserved in v2.
 
-pytest 미설치 대비 standalone runner 포함:
+Includes a standalone runner for environments without pytest installed:
     PYTHONDONTWRITEBYTECODE=1 python -B tests/test_recalibration.py
 """
 from __future__ import annotations

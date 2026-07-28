@@ -1,10 +1,11 @@
-"""v3 G4: 학습 동역학 (train p99 + dual backlog) — 집계의 훈련시 이점 가시화.
+"""v3 G4: training dynamics (train p99 + dual backlog) -- visualizes the
+training-time benefit of the aggregation.
 
-입력: results/final_l2w40/train_{arm}_s{S}.csv
+Input: results/final_l2w40/train_{arm}_s{S}.csv
   (iter,timestamp_iso,actor_loss,critic_loss,avg_return,p99_train,
    p99_9_train,mean_Z_99_train,mean_Z_99_9_train,T)
-출력: docs/v3/figs/fig_training.{png,pdf}
-사용: python -B fig_training.py [arm1 arm2 ...]
+Output: docs/v3/figs/fig_training.{png,pdf}
+Usage: python -B fig_training.py [arm1 arm2 ...]
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ RES = (r"D:\WLAN\experiments\results\final_l2w40" if os.name == "nt"
 OUT = (r"D:\WLAN\docs\v3\figs" if os.name == "nt"
        else "figs")
 EPS99 = 1e-2
-P99_FLOOR = 1e-4  # log 축용 0 클립 (캡션에 명시)
+P99_FLOOR = 1e-4  # zero clip for the log axis (stated in the caption)
 COLOR = {"pxqr": "#005a32", "none": "#1f6fb4", "cluster": "#8a5fbf",
          "uniform": "#888888", "qffl": "#e6ab02", "afl": "#d95f02"}
 LABEL = {"pxqr": "LyMAPPO (full)", "none": "w/o PX+QR (base)",
@@ -31,7 +32,7 @@ LABEL = {"pxqr": "LyMAPPO (full)", "none": "w/o PX+QR (base)",
 
 
 def series(arm):
-    """arm 의 시드별 (p99[iter], z[iter]) 배열 목록."""
+    """List of per-seed (p99[iter], z[iter]) arrays for the arm."""
     runs = []
     for path in sorted(glob.glob(f"{RES}/train_{arm}_s*.csv")):
         p99, z = [], []
@@ -40,12 +41,12 @@ def series(arm):
                 p99.append(float(row["p99_train"]))
                 z.append(float(row["mean_Z_99_train"])
                          + float(row["mean_Z_99_9_train"]))
-        if len(p99) >= 100:  # 완주 run 만 (진행 중 배터리의 부분 CSV 제외)
+        if len(p99) >= 100:  # completed runs only (skip partial CSVs of a running battery)
             runs.append((np.array(p99), np.array(z)))
     return runs
 
 
-STYLE = {  # arm: (색, 선형, 마커) — 평균선 구분용
+STYLE = {  # arm: (color, line style, marker) -- to distinguish the mean lines
     "pxqr": ("#005a32", "-", "*"), "none": ("#1f6fb4", "--", "o"),
     "cluster": ("#8a5fbf", "-.", "s"), "uniform": ("#555555", ":", "^")}
 
@@ -58,7 +59,7 @@ def main():
     per_arm = {a: r for a, r in per_arm.items() if r}
     n_it = min(min(len(p) for p, _ in r) for r in per_arm.values())
     it = np.arange(n_it)
-    # 공용 min–max envelope (전 arm 전 run) — 시드 스파게티 대체
+    # Shared min-max envelope (all runs of all arms) -- replaces the seed spaghetti
     all_p = np.stack([np.maximum(p[:n_it], P99_FLOOR)
                       for r in per_arm.values() for p, _ in r])
     all_z = np.stack([z[:n_it] for r in per_arm.values() for _, z in r])
@@ -84,7 +85,7 @@ def main():
     axb.set_xlabel("training iteration", fontsize=8.5)
     axb.grid(alpha=0.2)
     axb.tick_params(labelsize=7.5)
-    # 범례: Fig.3 과 동일 스타일 — 하단 박스, 행우선 3+2 배치
+    # Legend: same style as Fig.3 -- bottom box, row-major 3+2 layout
     handles, labels = axa.get_legend_handles_labels()
     half = (len(handles) + 1) // 2
     order = []

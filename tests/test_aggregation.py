@@ -1,6 +1,6 @@
-"""ZQ / hybrid aggregation measure 단위 테스트 (WCL 개정 게이트 1).
+"""Unit tests for the ZQ / hybrid aggregation measure (WCL revision gate 1).
 
-pytest 미설치 환경 대비 standalone runner 포함:
+Includes a standalone runner for environments without pytest installed:
     PYTHONDONTWRITEBYTECODE=1 python -B tests/test_aggregation.py
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ N_LINKS = 3
 
 
 def _fake_actions(links_per_ap: list[list[int]]) -> dict[int, dict]:
-    """AP 별 활성 링크 집합 -> collect_rollout 의 last_actions 형태."""
+    """Per-AP active link set -> the last_actions form used by collect_rollout."""
     actions: dict[int, dict] = {}
     for ap_id, links in enumerate(links_per_ap):
         la = np.zeros((5, N_LINKS), dtype=np.int64)  # 5 STA per AP
@@ -67,7 +67,7 @@ def test_z_measure_missing_keys_falls_back_to_uniform() -> None:
 def test_agg_measure_iw_uses_link_overlap() -> None:
     actions = _fake_actions([[0, 1], [0, 1], [1, 2], [2]])
     measure = compute_agg_measure("iw", actions, {}, N_AP, N_LINKS)
-    # 토폴로지 (2,2,3,1): AP2 가 세 이웃 모두와 링크 공유
+    # topology (2,2,3,1): AP2 shares a link with all three neighbours
     assert measure.tolist() == [2.0, 2.0, 3.0, 1.0], measure
 
 

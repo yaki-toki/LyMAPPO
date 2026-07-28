@@ -1,22 +1,24 @@
-"""WLAN MARL 환경: N_AP × N_STA × K MLO 링크 + dual UHR 제약.
+"""WLAN MARL environment: N_AP x N_STA x K MLO links + dual UHR constraints.
 
-formulation Section II 의 Constrained MDP 를 구현한다:
-- State (식 1): AP·STA·링크 별 CSI, queue, HOL age, CBR, virtual queue
-- Action (식 2): MLO 링크 분포, MAP 모드, EDCA 파라미터, A-MPDU, 링크 활성화
-- Dual UHR 제약 (식 4): 두 virtual queue Z_j^(99), Z_j^(99.9)
-- Shaped reward (식 8): Lyapunov-style penalty 적용
+Implements the Constrained MDP of formulation Section II:
+- State (eq. 1): CSI, queue, HOL age, CBR, virtual queue per AP/STA/link
+- Action (eq. 2): MLO link distribution, MAP mode, EDCA parameters, A-MPDU,
+  link activation
+- Dual UHR constraints (eq. 4): two virtual queues Z_j^(99), Z_j^(99.9)
+- Shaped reward (eq. 8): Lyapunov-style penalty applied
 
-Multi-AP coordination 모델:
-- map_mode 0 (none): 각 AP 가 독립 contention
-- map_mode 1 (Co-TDMA): 슬롯마다 round-robin 으로 1 개 AP 만 송신
-- map_mode 2 (Co-OFDMA): 모든 AP 가 동시 송신, rate 를 1/N_AP 으로 분할
-- 모드는 AP 다수결로 결정 (협조형 시나리오 가정)
+Multi-AP coordination model:
+- map_mode 0 (none): each AP contends independently
+- map_mode 1 (Co-TDMA): only one AP transmits per slot, round-robin
+- map_mode 2 (Co-OFDMA): all APs transmit at once, rate split by 1/N_AP
+- The mode is decided by AP majority vote (cooperative scenario assumption)
 
-OBSS 간섭 모델:
-- 동일 링크 k 에서 여러 AP 가 active 하면 effective rate 를 분할
-- formulation 식 (9) 의 OBSS_i 를 추정값으로 obs.cbr 에 저장 (사후 step 에서 갱신)
+OBSS interference model:
+- If several APs are active on the same link k, the effective rate is split
+- OBSS_i of formulation eq. (9) is stored in obs.cbr as an estimate (refreshed
+  in the following step)
 
-Gym-style 외부 API 이지만 MARL 을 위해 dict-of-dicts (AP 별 obs/action).
+Gym-style external API, but dict-of-dicts (per-AP obs/action) for MARL.
 """
 from __future__ import annotations
 
@@ -55,21 +57,25 @@ class WLANConfig:
     bandwidth_hz: float = 20e6
     seed: int = 0
     V: float = 1.0
-    # AP 별 사용 가능한 link 인덱스. None 이면 전체 link 사용 (대칭 토폴로지).
-    # 예: [[0,1],[0,1],[1,2],[2]] -> AP0/1 은 link 0/1, AP2 는 1/2, AP3 는 2 만.
-    # 비대칭 토폴로지에서 OBSS overlap 이 AP 별로 달라져 식 (10) 의
-    # interference-weighted FedAvg 가중치가 명확한 비균등 패턴을 형성한다.
+    # Usable link indices per AP. None means all links are used (symmetric topology).
+    # e.g. [[0,1],[0,1],[1,2],[2]] -> AP0/1 use links 0/1, AP2 uses 1/2, AP3 only 2.
+    # In an asymmetric topology the OBSS overlap differs per AP, so the
+    # interference-weighted FedAvg weights of eq. (10) form a clearly non-uniform
+    # pattern.
     ap_link_sets: list | None = None
-    # True 시 env.reset() 에서 Lyapunov virtual queue Z_j^(l) 을 초기화하지 않음.
-    # rollout 사이에도 Z 가 누적되어 정책이 long-horizon Lyapunov 신호를 학습.
-    # baseline 평가는 default False (각 seed 마다 clean Z 시작) 를 유지.
+    # If True, env.reset() does not reinitialize the Lyapunov virtual queue Z_j^(l).
+    # Z then accumulates across rollouts and the policy learns a long-horizon
+    # Lyapunov signal. Baseline evaluation keeps the default False (clean Z start
+    # for every seed).
     persistent_z: bool = False
-    # 가상 큐 Z 의 상한 Z_max. 제안 기법 정식 정의 (eq:vqueue) 의 일부로
-    # 항상 활성화되며, saturation regime 에서 Z 발산으로 인한 policy collapse
-    # (페널티항이 throughput항을 압도하여 정책이 "전송 최소화" attractor 로
-    # 수렴) 를 차단한다. 기본값 100 은 drift constant B 와 같은 차수.
-    # feasible regime 에서는 Z 가 Z_max 에 도달하지 않으므로 결과 불변;
-    # None 으로 설정하면 cap 없는 ablation 모드 (saturation collapse 재현용).
+    # Upper bound Z_max of the virtual queue Z. Part of the formal definition of
+    # the proposed method (eq:vqueue), hence always active; it blocks the policy
+    # collapse caused by Z divergence in the saturation regime (the penalty term
+    # overwhelms the throughput term and the policy converges to a "minimize
+    # transmission" attractor). The default 100 is the same order as the drift
+    # constant B. In the feasible regime Z never reaches Z_max, so results are
+    # unchanged; setting it to None gives an ablation mode without the cap (to
+    # reproduce the saturation collapse).
     z_clip: float | None = 100.0
     # Airtime-consistent contention (recalibration v2). None => v1 behaviour:
     # contention is per-AP (perfect spatial reuse), so network-wide link
@@ -98,7 +104,7 @@ class WLANEnv:
         self.n_sta_total = self.cfg.n_ap * self.cfg.n_sta_per_ap
         self.sta_to_ap = np.repeat(np.arange(self.cfg.n_ap), self.cfg.n_sta_per_ap)
 
-        # AP 별 사용 가능 링크 mask (식 1 의 channel set K_i 정의).
+        # Usable-link mask per AP (channel set K_i defined in eq. 1).
         self.ap_link_mask = np.ones(
             (self.cfg.n_ap, self.cfg.n_links), dtype=np.int32
         )
@@ -116,14 +122,16 @@ class WLANEnv:
             [EDCAQueue() for _ in range(self.cfg.n_links)]
             for _ in range(self.n_sta_total)
         ]
-        # P1: MLD 상위-MAC 공유 버퍼 — 도착은 per-STA 버퍼에 쌓이고, 전송
-        # 링크는 서비스 시점의 링크 선택이 결정한다 (링크별 큐 좌초 제거).
-        # self.queues 는 per-(STA,link) EDCA contention 상태 전용으로 유지.
+        # P1: MLD upper-MAC shared buffer -- arrivals accumulate in the per-STA
+        # buffer and the transmit link is decided by the link selection at service
+        # time (removes per-link queue stranding).
+        # self.queues is kept exclusively for per-(STA,link) EDCA contention state.
         self.buffers: List[Deque[Packet]] = [
             deque() for _ in range(self.n_sta_total)
         ]
-        # P2: 도착 순서 (FIFO) 로 append-only 도착 시각 기록. crossed 포인터가
-        # "deadline 을 넘긴 순간 1회 집계" 를 O(1) amortized 로 전진시킨다.
+        # P2: append-only record of arrival times in arrival (FIFO) order. The
+        # crossed pointer advances "count once at the moment the deadline is
+        # passed" in O(1) amortized time.
         self._arrive_ts: List[List[float]] = [
             [] for _ in range(self.n_sta_total)
         ]
@@ -164,7 +172,7 @@ class WLANEnv:
         self._arrived.fill(0)
         self._served.fill(0)
         self._link_busy_until.fill(0)
-        # Z 는 cfg.persistent_z 에 따라 보존 / 초기화.
+        # Z is preserved or reset according to cfg.persistent_z.
         for ell in PERCENTILES:
             if not self.cfg.persistent_z:
                 self.Z[ell].fill(0.0)
@@ -183,8 +191,9 @@ class WLANEnv:
         Dict[int, bool],
         Dict[str, float],
     ]:
-        # 1. Poisson 도착: 모든 STA 에 BE (AC=2) 패킷을 per-STA 공유 버퍼로
-        #    적재 (P1: 링크는 전송 시점에 결정 — MLD 상위-MAC 큐 모델).
+        # 1. Poisson arrivals: load BE (AC=2) packets for every STA into the
+        #    per-STA shared buffer (P1: the link is decided at transmit time --
+        #    MLD upper-MAC queue model).
         n_arr = self.rng.poisson(
             self.cfg.arrival_pps * self.cfg.slot_dt_s, size=self.n_sta_total
         )
@@ -202,15 +211,16 @@ class WLANEnv:
                     )
                 )
 
-        # 1b. AP 별 link mask 강제 적용 — formulation 식 (1) 의 K_i 정의 반영.
-        #     AP 가 사용 불가능한 link 의 link_active 를 0 으로 강제 (in-place).
+        # 1b. Enforce the per-AP link mask -- reflects the K_i definition of
+        #     formulation eq. (1). Forces link_active to 0 for links an AP cannot
+        #     use (in-place).
         for ap_id in range(self.cfg.n_ap):
             la = np.asarray(actions[ap_id]["link_active"])
             actions[ap_id]["link_active"] = (
                 la * self.ap_link_mask[ap_id][np.newaxis, :]
             ).astype(np.int32)
 
-        # 2. EDCA 파라미터 설치 (action -> queue).
+        # 2. Install EDCA parameters (action -> queue).
         for ap_id, ap_action in actions.items():
             sta_ids = np.where(self.sta_to_ap == ap_id)[0]
             for j in sta_ids:
@@ -222,31 +232,31 @@ class WLANEnv:
                         ap_action["edca_txop_us"],
                     )
 
-        # 3. MAP 모드: 다수결로 글로벌 모드 결정 (협조형).
+        # 3. MAP mode: the global mode is decided by majority vote (cooperative).
         map_modes = [int(actions[a]["map_mode"]) for a in range(self.cfg.n_ap)]
         global_map_mode = max(set(map_modes), key=map_modes.count)
 
-        # 4. 링크별 OBSS overlap 계산: 각 link k 에서 active 한 AP 수.
+        # 4. Per-link OBSS overlap: number of APs active on each link k.
         ap_link_active = np.zeros((self.cfg.n_ap, self.cfg.n_links))
         for ap_id in range(self.cfg.n_ap):
             la = np.asarray(actions[ap_id]["link_active"])  # (n_sta_per_ap, n_links)
             md = np.asarray(actions[ap_id]["mlo_dist"])
-            # AP 가 link k 를 사용하는지: STA 중 1 명이라도 active+positive prob 면 사용.
+            # Whether the AP uses link k: used if any STA is active with positive prob.
             ap_link_active[ap_id] = (la.sum(axis=0) * (md.sum(axis=0) > 0)).astype(float)
         per_link_active_aps = (ap_link_active > 0).astype(int).sum(axis=0)
         per_link_active_aps = np.maximum(per_link_active_aps, 1)
         self.cbr = ap_link_active / max(self.n_sta_total / self.cfg.n_ap, 1)
 
-        # 5. Co-TDMA 의 경우: 슬롯마다 한 AP 만 송신 가능.
+        # 5. Co-TDMA case: only one AP may transmit per slot.
         if global_map_mode == 1:
             tdma_winner = self.t_step % self.cfg.n_ap
         else:
             tdma_winner = None
 
-        # 6. AP × link 별 Bianchi contention.
+        # 6. Bianchi contention per AP x link.
         rewards = {ap_id: 0.0 for ap_id in range(self.cfg.n_ap)}
         latencies_collected: List[float] = []
-        # P2/P3: 이번 슬롯의 per-STA 위반 이벤트 (늦은 서비스 + 나이 초과).
+        # P2/P3: per-STA violation events in this slot (late service + age exceeded).
         self._v_slot = {
             ell: np.zeros(self.n_sta_total, dtype=np.int64)
             for ell in PERCENTILES
@@ -265,11 +275,11 @@ class WLANEnv:
             sta_ids = np.where(self.sta_to_ap == ap_id)[0]
             ap_act = actions[ap_id]
             for k in range(self.cfg.n_links):
-                # 6a. AP-link 의 contention 후보 STA 와 시도 확률 수집.
+                # 6a. Collect the contending STAs of this AP-link and their attempt probs.
                 contenders: List[Tuple[int, float]] = []
                 for j in sta_ids:
                     if not self.buffers[j]:
-                        # P1: 보낼 패킷이 없으면 contention 미참여.
+                        # P1: no packet to send -> does not join the contention.
                         continue
                     local_idx = j - ap_id * self.cfg.n_sta_per_ap
                     mlo_dist = np.asarray(ap_act["mlo_dist"][local_idx])
@@ -284,7 +294,7 @@ class WLANEnv:
                 if not contenders:
                     continue
 
-                # 6b. 각 STA 가 송신 시도하는지 sample.
+                # 6b. Sample whether each STA attempts a transmission.
                 attempts = []
                 for j, tau in contenders:
                     if self.rng.random() < tau:
@@ -292,12 +302,12 @@ class WLANEnv:
                 if not attempts:
                     continue
                 if len(attempts) >= 2:
-                    # 충돌: 모든 시도자 CW 두 배.
+                    # Collision: double the CW of every attempting STA.
                     for j in attempts:
                         self.queues[j][k].on_collision(ac=2)
                     continue
 
-                # 6c. 단일 송신자: A-MPDU 만큼 serve, OBSS + Co-OFDMA 비례 적용.
+                # 6c. Single transmitter: serve up to A-MPDU, scaled by OBSS + Co-OFDMA.
                 j = attempts[0]
                 local_idx = j - ap_id * self.cfg.n_sta_per_ap
                 ampdu_len = int(np.asarray(ap_act["ampdu_len"][local_idx])[k])
@@ -305,7 +315,7 @@ class WLANEnv:
                 co_ofdma_factor = (
                     1.0 / self.cfg.n_ap if global_map_mode == 2 else 1.0
                 )
-                # rate-aware: csi 가 좋을수록 더 많이 serve.
+                # rate-aware: the better the csi, the more is served.
                 rate_ratio = float(
                     self.channel.rate_bps(self.csi[j, k:k + 1])[0]
                     / self.channel.rate_bps(np.array([self.channel.n_states - 1]))[0]
@@ -314,9 +324,10 @@ class WLANEnv:
                     1,
                     int(round(ampdu_len * rate_ratio * obss_factor * co_ofdma_factor)),
                 )
-                # P1: 공유 버퍼에서 FIFO serve — 링크 k 는 전송 수단일 뿐,
-                # 패킷이 링크에 결박되지 않는다. 늦은 서비스 위반은
-                # _serve_buffer 가 _v_slot 에 기록 (중복 집계 방지 포함).
+                # P1: FIFO service from the shared buffer -- link k is only the
+                # transmission means, packets are not bound to a link. Late-service
+                # violations are recorded in _v_slot by _serve_buffer (including
+                # double-count prevention).
                 lats, bits = self._serve_buffer(j, effective_n)
                 if bits > 0:
                     self.queues[j][k].on_success(ac=2)
@@ -326,8 +337,9 @@ class WLANEnv:
                         float(bits) / self.cfg.pkt_size_bits
                     )
 
-        # 6b. P2: 나이-초과 집계 — 서비스 여부와 무관하게 큐 내 나이가
-        #     L^(l) 를 넘는 순간 위반 1회 (FIFO 단조성 -> 포인터 전진).
+        # 6b. P2: age-exceeded accounting -- regardless of service, one violation
+        #     at the moment the in-queue age exceeds L^(l) (FIFO monotonicity ->
+        #     pointer advance).
         for j in range(self.n_sta_total):
             ats = self._arrive_ts[j]
             n_arr_j = int(self._arrived[j])
@@ -339,9 +351,10 @@ class WLANEnv:
                     c += 1
                 self._crossed[ell][j] = c
 
-        # 6c. P3: Lyapunov 페널티 + Z 갱신 — v 에 좌초 (나이 초과) 포함.
-        #     penalty 는 갱신 전 Z(t) 를 사용 (drift-plus-penalty 표준),
-        #     allowance 는 이번 슬롯의 '결정 완료' 패킷 수에 비례.
+        # 6c. P3: Lyapunov penalty + Z update -- v includes stranding (age
+        #     exceeded). The penalty uses Z(t) before the update (standard
+        #     drift-plus-penalty), and the allowance is proportional to the number
+        #     of packets 'decided' in this slot.
         for j in range(self.n_sta_total):
             ap_id_j = int(self.sta_to_ap[j])
             penalty = 0.0
@@ -366,15 +379,16 @@ class WLANEnv:
 
         self._packet_count += int(len(latencies_collected))
 
-        # 7. 채널 진화 + 시간 증가.
+        # 7. Channel evolution + time advance.
         self.csi = self.channel.step(self.csi)
         self.t_step += 1
         self.t += self.cfg.slot_dt_s
 
         done = self.t_step >= self.cfg.horizon
         dones = {ap_id: done for ap_id in range(self.cfg.n_ap)}
-        # P2: 분모 = '결정 완료' 패킷 (서비스됨 or 나이-초과 확정). 좌초
-        # 패킷을 생존자 통계에서 빼던 기존 회계를 대체한다.
+        # P2: denominator = 'decided' packets (served, or confirmed age-exceeded).
+        # Replaces the previous accounting that dropped stranded packets from the
+        # survivor statistics.
         decided_totals = {
             ell: int(np.maximum(self._served, self._crossed[ell]).sum())
             for ell in PERCENTILES
@@ -391,7 +405,7 @@ class WLANEnv:
             "packets_arrived": int(self._arrived.sum()),
             "mean_Z_99": float(self.Z[99].mean()),
             "mean_Z_99_9": float(self.Z[99.9].mean()),
-            # per-AP 가상 큐 압력 (zq/hybrid aggregation 의 dual-변수 measure).
+            # per-AP virtual queue pressure (dual-variable measure of zq/hybrid aggregation).
             "Z_per_ap_99": [
                 float(self.Z[99][self.sta_to_ap == ap].mean())
                 for ap in range(self.cfg.n_ap)
@@ -491,11 +505,11 @@ class WLANEnv:
                     self._link_busy_until[k, grp] = self.t_step + max(1, tx_slots)
 
     def _serve_buffer(self, j: int, n_pkts: int) -> Tuple[np.ndarray, int]:
-        """P1: per-STA 공유 버퍼에서 FIFO 로 최대 n_pkts 개 서비스.
+        """P1: serve at most n_pkts packets FIFO from the per-STA shared buffer.
 
-        P2: 늦은 서비스 (lat > L^(l)) 는 crossed 포인터 이전 인덱스면 이미
-        나이-초과로 집계된 패킷이므로 중복 집계하지 않는다. 서비스된 구간은
-        두 percentile 모두 '결정 완료' 로 포인터를 전진시킨다.
+        P2: a late service (lat > L^(l)) at an index before the crossed pointer has
+        already been counted as age-exceeded, so it is not counted twice. The served
+        range advances the pointer to 'decided' for both percentiles.
         """
         buf = self.buffers[j]
         lats: List[float] = []
@@ -522,15 +536,15 @@ class WLANEnv:
         for ap_id in range(self.cfg.n_ap):
             sta_ids = np.where(self.sta_to_ap == ap_id)[0]
             ap_csi = self.csi[sta_ids]
-            # P1: 공유 버퍼 길이/HOL age 를 전 링크 열에 동일하게 노출
-            # (obs shape 유지: (n_sta, n_links, N_AC) / (n_sta, n_links)).
+            # P1: expose the shared buffer length / HOL age identically across all
+            # link columns (obs shape kept: (n_sta, n_links, N_AC) / (n_sta, n_links)).
             buf_len = np.array(
                 [len(self.buffers[j]) for j in sta_ids], dtype=np.float32
             )
             ap_q = np.zeros(
                 (len(sta_ids), self.cfg.n_links, N_AC), dtype=np.float32
             )
-            ap_q[:, :, 2] = buf_len[:, None]  # BE (AC=2) 열에 배치
+            ap_q[:, :, 2] = buf_len[:, None]  # placed in the BE (AC=2) column
             hol = np.array(
                 [
                     self.t - self.buffers[j][0].arrive_t
@@ -548,9 +562,10 @@ class WLANEnv:
                 "cbr": self.cbr[ap_id].astype(np.float32),
                 "Z_99": self.Z[99][sta_ids].astype(np.float32),
                 "Z_99_9": self.Z[99.9][sta_ids].astype(np.float32),
-                # P7: 공유 (연합) actor 가 자기 AP 의 링크 집합 K_i 를 관측
-                # 해야 비대칭 토폴로지에서 조건부 특화가 가능하다. 이것이
-                # 없으면 shared actor 는 링크-집합 blind (none arm 만 유리).
+                # P7: the shared (federated) actor must observe its own AP's link
+                # set K_i for conditional specialization to be possible in an
+                # asymmetric topology. Without it the shared actor is link-set
+                # blind (only the none arm benefits).
                 "link_mask": self.ap_link_mask[ap_id].astype(np.float32),
             }
         return obs
