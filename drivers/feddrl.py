@@ -138,7 +138,7 @@ def _link_masks() -> np.ndarray:
     """
     global _LINK_MASKS_CACHE
     if _LINK_MASKS_CACHE is None:
-        from models.train_feddrl import make_asymmetric_link_sets  # type: ignore
+        from models.topology import make_asymmetric_link_sets  # type: ignore
 
         masks = np.zeros((N_AP, N_LINKS), dtype=np.float32)
         for ap, links in enumerate(make_asymmetric_link_sets(N_AP)):
@@ -657,7 +657,7 @@ def main() -> int:
     _OBS_DUMP_ON = args.obs_dump is not None
 
     # Ensure the WLAN repo root is importable for BOTH actor and RSSI paths.
-    # _link_masks() pulls make_asymmetric_link_sets from models.train_feddrl;
+    # _link_masks() pulls make_asymmetric_link_sets from models.topology;
     # in RSSI mode _load_actors (which used to add this) never runs.
     if args.repo_root not in sys.path:
         sys.path.insert(0, args.repo_root)
