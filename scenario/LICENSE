@@ -1,0 +1,10 @@
+SPDX-License-Identifier: GPL-2.0-only
+
+The C++ sources in this directory are ns-3 scenario/module code that
+links against ns-3 (https://www.nsnam.org/) and are therefore licensed
+under the GNU General Public License version 2, the same license as
+ns-3 itself.
+
+Full license text: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+(The full text will be vendored into this file before public release —
+tracked in docs/ROADMAP.md.)

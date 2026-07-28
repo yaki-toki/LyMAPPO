@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "LyMAPPO: an ns-3-in-the-loop RL platform for Wi-Fi 8 (802.11bn) UHR experimentation"
+type: software
+authors:
+  - family-names: "Kim"
+    given-names: "Jiha"
+  - family-names: "Park"
+    given-names: "Seunghyun"
+  - family-names: "Park"
+    given-names: "Hyunhee"
+repository-code: "https://github.com/yaki-toki/LyMAPPO"
+license: "MIT AND GPL-2.0-only"
+notes: "The accompanying paper is under review; this citation will be updated on publication."
