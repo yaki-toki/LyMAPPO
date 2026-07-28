@@ -61,11 +61,18 @@ else
 fi
 
 # Some bundled ns3-ai examples do not compile against the ns-3.40 API.
-if [ -d "${NS3AI_DIR}/examples" ] && [ ! -f "${NS3AI_DIR}/.examples_pruned" ]; then
+# Removing the directories is not enough: their add_subdirectory() references
+# must also be commented out, or CMake configure fails.
+if [ -d "${NS3AI_DIR}/examples" ]; then
     rm -rf "${NS3AI_DIR}/examples/rate-control/thompson-sampling"
     rm -rf "${NS3AI_DIR}/examples/rl-tcp"
     rm -rf "${NS3AI_DIR}/examples/multi-bss"
-    touch "${NS3AI_DIR}/.examples_pruned"
+    sed -i -E 's/^([[:space:]]*)add_subdirectory\((rl-tcp|multi-bss)\)/\1# pruned (ns-3.40 incompatible): add_subdirectory(\2)/' \
+        "${NS3AI_DIR}/examples/CMakeLists.txt"
+    if [ -f "${NS3AI_DIR}/examples/rate-control/CMakeLists.txt" ]; then
+        sed -i -E 's|^([[:space:]]*)add_subdirectory\((thompson-sampling)\)|\1# pruned (ns-3.40 incompatible): add_subdirectory(\2)|' \
+            "${NS3AI_DIR}/examples/rate-control/CMakeLists.txt"
+    fi
     echo "[install] pruned ns3-ai examples incompatible with ns-3.40"
 fi
 
