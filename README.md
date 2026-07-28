@@ -26,6 +26,8 @@ It provides three things:
    so third parties can re-run and check the numbers, or plug in their
    own policy and compare.
 
+<p align="center"><img src="assets/fig_topology.png" alt="16-AP dense multi-band topology: 4x4 grid, asymmetric link sets tiled by column, zero-sum load spread" width="640"></p>
+
 ## Fidelity scope (please read)
 
 The PHY/MAC base is **802.11ax**; MLO is emulated with per-link
@@ -99,6 +101,36 @@ python3 train_ns3.py --aggregation none --price-beta 0.05 --seed 0 \
 See [docs/REPRODUCE.md](docs/REPRODUCE.md) for the full battery list,
 the settled protocol constants, expected wall-clock times, and the
 statistics conventions used to compare arms.
+
+## Representative results
+
+Approximate numbers from the settled operating point (λ = 60 pkt/s/STA,
+deadlines 20/40 ms, 110 s evaluation episodes, held-out channel seeds;
+mean ± std across seeds — reproduce with the batteries in
+[docs/REPRODUCE.md](docs/REPRODUCE.md)):
+
+| Policy | Feasible BSSs (of 16) ↑ | Network p99 ↓ | Network p99.9 ↓ | Delivered (of 4800 pkt/s) |
+|---|---|---|---|---|
+| **LyMAPPO (full)** | **15.1 ± 0.6** | **0.0017** | **0.0013** | 4794 |
+| Round-robin | 9.0 ± 1.2 | 0.0103 | 0.0040 | 4783 |
+| RSSI-greedy | 7.8 ± 0.7 | 0.0158 | 0.0068 | 4773 |
+| SLCI (least-congested) | 3.9 ± 0.4 | 0.0423 | 0.0097 | 4754 |
+
+Every arm delivers ≥ 99 % of offered traffic, so the differences above
+are tail-shape differences, not capacity differences. The feasibility
+and network-p99 margins over the static baselines are significant under
+multiple-comparison (Holm) correction; the deeper p99.9 tails are
+weaker (raw seed-level only vs. round-robin). Learned baselines trained
+in the same loop land closer — LyMAPPO 14.6 ± 0.9 vs. PPO-Lagrangian
+13.8 ± 1.5 vs. shared-actor MAPPO 12.4 ± 3.2 feasible BSSs (11 s
+protocol) — a point-estimate lead that is within noise at n = 8 seeds.
+Federated parameter aggregation (FedAvg, q-FFL, AFL, clustered FL)
+stays *below* independent learning on held-out conditions (9.8–11.2
+feasible BSSs), which is the platform's core cautionary finding.
+
+<p align="center"><img src="assets/fig_seeds.png" alt="Feasibility vs network p99 across arms (seed-level mean and dispersion)" width="560"></p>
+
+<p align="center"><img src="assets/fig_sweep.png" alt="Load sweep 40-80 pkt/s/STA: feasible APs and network p99 per policy" width="560"></p>
 
 ## Develop your own policy
 
