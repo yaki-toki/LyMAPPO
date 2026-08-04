@@ -105,12 +105,13 @@ wsl bash -c "cd ~/LyMAPPO && bash scripts/smoke.sh"
 |---|---|
 | `scenario/` | ns-3 scenario (C++): topology, channels, MLO queueing, KPI accounting, ns3-ai message interface |
 | `drivers/` | `train_ns3.py` (training: LyMAPPO / MAPPO / PPO-Lagrangian / FL arms), `feddrl.py` (evaluation + static policies) |
-| `models/` | `networks.py` (actor/critic, observation encoding), `mappo.py` (PPO/GAE, aggregators) |
+| `models/` | `networks.py` (actor/critic, observation encoding), `mappo.py` (PPO/GAE, aggregators), `policy_api.py` (plug-in policy interface) |
+| `examples/` | example plug-in policies (`policies/greedy_score.py`) |
 | `scripts/` | experiment batteries (`_*.sh`) + `_core_cmp_analyze.py` (seed-level statistics) |
 | `scripts/figures/` | figure generation from result CSVs |
 | `sim/` | Python-side environment utilities shared with the drivers (link-set definitions, EDCA constants) and a fast standalone surrogate environment — **not** the evidence path of the paper (that is ns-3), kept for unit testing and quick iteration |
 | `tests/` | unit tests (aggregation, FL baselines, observation encoding, surrogate environment) |
-| `docs/` | INSTALL, REPRODUCE, ROADMAP |
+| `docs/` | INSTALL, REPRODUCE, TUTORIAL (custom policies), ROADMAP |
 
 ## Full workflow, step by step
 
@@ -298,16 +299,28 @@ feasible BSSs), which is the platform's core cautionary finding.
 
 ## Develop your own policy
 
-Two entry points, in increasing depth:
+Implement `Policy.act(obs, link_masks) → PolicyAction` in your own module
+and run it without touching any driver code — the evaluation driver loads
+it by dotted path:
 
-- **Evaluation-only policy**: add a branch to `feddrl.py --policy`
-  (see `rr` / `rssi` / `slci`) that maps the per-slot observation to a
-  per-STA link choice.
-- **Trained policy**: `train_ns3.py` exposes the training loop —
-  observation encoding (106-D per AP: CSI, log backlog, HoL age, CBR,
-  duals, link mask), masked per-STA link logits, and reward shaping —
-  behind CLI switches. A cleaner plug-in `Policy` API is planned
-  (see [roadmap](docs/ROADMAP.md)).
+```bash
+python3 feddrl.py ... --policy examples.policies.greedy_score.GreedyScorePolicy
+```
+
+Your policy receives, every 20 ms macro slot, the same observation bridge
+as the LyMAPPO actor (per-AP CSI, backlog, HoL age, CBR, reconstructed
+Lyapunov duals, allowed-link mask) and returns per-STA link choices plus a
+MAPC mode. Output is validated every slot, so contract bugs fail fast. The
+full walkthrough — interface, observation schema, running against the
+built-in baselines, unit-testing without ns-3 — is in
+[docs/TUTORIAL.md](docs/TUTORIAL.md); the API lives in
+`models/policy_api.py` (numpy-only, no torch required) with a worked
+example at `examples/policies/greedy_score.py`.
+
+For a **trained** policy, `train_ns3.py` exposes the training loop —
+observation encoding (106-D per AP), masked per-STA link logits, and reward
+shaping — behind CLI switches; with a plug-in policy active, `--ckpt` is
+handed to your constructor so you can load your own weights.
 
 ## Known issues
 

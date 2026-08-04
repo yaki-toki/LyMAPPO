@@ -13,6 +13,9 @@ Policy modes:
   actor MLP samples link/mapMode. CSI and the Z queues are absent on the ns-3
   side, so placeholder values are used -- part of the sim2sim gap originates
   from this obs schema difference (for the cross-validation report).
+- ``--policy <pkg.module.ClassName>`` -> plug-in policy via the API in
+  ``models/policy_api.py`` (see docs/TUTORIAL.md); it receives the same
+  per-slot obs bridge as the actor path.
 
 Running (inside WSL Ubuntu):
     cd ~/ns-3-dev/contrib/ai/examples/feddrl
@@ -299,6 +302,25 @@ def _slci_policy(env_msg: Any, act_msg: Any) -> None:
     act_msg.mapMode = 0
 
 
+def _custom_policy_step(env_msg: Any, act_msg: Any, policy: Any) -> None:
+    """Bridge one macro slot to a plug-in Policy (``models/policy_api.py``).
+
+    Reuses the SAME obs bridge as the actor path (``_ns3_obs_to_python``), so
+    a custom policy sees exactly what the LyMAPPO actor sees each slot,
+    including the reconstructed Z duals.
+    """
+    from models.policy_api import validate_action  # type: ignore
+
+    obs = _ns3_obs_to_python(env_msg)
+    action = validate_action(
+        policy.act(obs, _link_masks()), N_AP, N_STA_PER_AP, N_LINKS)
+    for ap in range(N_AP):
+        for sta in range(N_STA_PER_AP):
+            act_msg.set_selected_link(
+                ap, sta, int(action.selected_links[ap, sta]))
+    act_msg.mapMode = action.map_mode
+
+
 def _actor_policy(
     env_msg: Any,
     act_msg: Any,
@@ -372,6 +394,7 @@ def _run_loop(
     slci: bool = False,
     no_coord: bool = False,
     balance_links: bool = False,
+    custom_policy: Any = None,
 ) -> int:
     n_slots = 0
     mode_hist = [0, 0, 0]   # how often each map_mode is sent (0 = no coord)
@@ -394,6 +417,8 @@ def _run_loop(
                 _rssi_policy(env_msg, act_msg)
             elif slci:
                 _slci_policy(env_msg, act_msg)
+            elif custom_policy is not None:
+                _custom_policy_step(env_msg, act_msg, custom_policy)
             elif actors is None:
                 _stub_policy(act_msg)
             else:
@@ -580,11 +605,15 @@ def main() -> int:
         "--policy",
         type=str,
         default="auto",
-        choices=["auto", "rssi", "stub", "slci"],
-        help="auto=ckpt actor (if present)/stub, rssi=fixed RSSI-MLO policy "
-             "(for calibration), slci=published least-congested-interface "
-             "heuristic (Lopez-Raventos & Bellalta, IEEE WCL 2022): pick the "
-             "minimum-CBR link among the allowed links.",
+        help="Built-ins: auto=ckpt actor (if present)/stub, rssi=fixed "
+             "RSSI-MLO policy (for calibration), slci=published "
+             "least-congested-interface heuristic (Lopez-Raventos & Bellalta, "
+             "IEEE WCL 2022): pick the minimum-CBR link among the allowed "
+             "links. Anything else is loaded via the plug-in API "
+             "(models/policy_api.py): a registered policy name or a dotted "
+             "path pkg.module.ClassName importable from --repo-root, e.g. "
+             "examples.policies.greedy_score.GreedyScorePolicy. See "
+             "docs/TUTORIAL.md.",
     )
     parser.add_argument(
         "--no-coord",
@@ -689,9 +718,32 @@ def main() -> int:
         args.hol_norm_ms if args.hol_norm_ms is not None
         else args.deadline999_ms) * 1e-3
 
+    # Plug-in policies (docs/TUTORIAL.md): any --policy value that is not a
+    # built-in name resolves through models/policy_api.py. Must happen after
+    # the sys.path insert above so user packages under --repo-root import.
+    custom_policy: Any = None
+    if args.policy not in ("auto", "rssi", "stub", "slci"):
+        from models.policy_api import load_policy  # type: ignore
+
+        try:
+            custom_policy = load_policy(
+                args.policy,
+                n_ap=N_AP,
+                n_sta_per_ap=N_STA_PER_AP,
+                n_links=N_LINKS,
+                seed=args.seed,
+                ckpt=args.ckpt,
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"[feddrl.py] {exc}\n")
+            return 2
+        sys.stderr.write(f"[feddrl.py] loaded plug-in policy: {args.policy}\n")
+
     actors: Optional[List[Any]] = None
     sample_action_fn: Any = None
-    if args.ckpt:
+    # With a plug-in policy, --ckpt is handed to ITS constructor instead of
+    # the built-in LyMAPPO actor loader.
+    if args.ckpt and custom_policy is None:
         if not os.path.isfile(args.ckpt):
             sys.stderr.write(f"[feddrl.py] ckpt not found: {args.ckpt}\n")
             return 2
@@ -751,6 +803,7 @@ def main() -> int:
             slci=(args.policy == "slci"),
             no_coord=args.no_coord,
             balance_links=args.balance_links,
+            custom_policy=custom_policy,
         )
     finally:
         sys.stderr.write(

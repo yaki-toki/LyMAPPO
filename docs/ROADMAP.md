@@ -1,14 +1,17 @@
 # Roadmap
 
-## v1.0 — platform ergonomics (planned)
+## v1.0 — platform ergonomics
 
-- **Policy plug-in API**: `Policy.act(obs, link_mask) -> per-STA link`
-  with a registry and `--policy mypkg.MyPolicy`, so external agents do
-  not need to touch `train_ns3.py`. All bundled arms re-wired through it.
+- ✅ **Policy plug-in API** (evaluation side): `Policy.act(obs, link_masks)
+  -> PolicyAction` with a registry and `--policy pkg.module.ClassName` —
+  `models/policy_api.py`, example in `examples/policies/`, walkthrough in
+  `docs/TUTORIAL.md`. Still open: a training-side hook so custom agents
+  can also learn in the loop without touching `train_ns3.py`.
+- ✅ Tutorial: write, evaluate, and unit-test a custom policy
+  (`docs/TUTORIAL.md`).
+- ✅ English pass over in-code comments.
 - Scenario parameter presets (YAML) replacing long CLI flag lists.
-- Tutorial: write, evaluate, and train a custom policy end-to-end.
 - CI: host-side unit tests on every push; periodic full ns-3 build smoke.
-- English pass over remaining in-code comments.
 - Vendor full GPL-2.0 text in `scenario/LICENSE`.
 
 ## v2.0 — native 802.11be MLO and 802.11bn MAPC prototypes (planned)
